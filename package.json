@@ -1,10 +1,13 @@
 {
   "name": "bats-tarot",
-  "version": "1.0.0",
+  "version": "1.10.0",
   "description": "Business Ashram Tarot System - PWA",
   "main": "index.html",
   "scripts": {
     "build": "echo 'No build step needed - static PWA'",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "backup": "node -e \"const fs=require('fs'),p=require('path'),cp=require('child_process');const ts=new Date().toISOString().replace(/[:.]/g,'-').slice(0,19);const dest=p.join('_backups','bats-'+ts);fs.mkdirSync(dest,{recursive:true});const exclude=['node_modules','.git','_backups','android','www'];const copyDir=(s,d)=>{fs.mkdirSync(d,{recursive:true});fs.readdirSync(s).forEach(f=>{if(exclude.includes(f))return;const sp=p.join(s,f),dp=p.join(d,f);if(fs.statSync(sp).isDirectory())copyDir(sp,dp);else fs.copyFileSync(sp,dp);});};copyDir('.',dest);console.log('Backup:',dest);\"",
     "capacitor:init": "npx cap init BATS-Tarot com.bats.tarot --webDir .",
     "capacitor:add:android": "npx cap add android",
     "capacitor:sync": "npx cap sync",
@@ -24,5 +27,8 @@
     "@capacitor/filesystem": "^8.1.2",
     "@capacitor/share": "^8.0.1",
     "localtunnel": "^2.0.2"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.7"
   }
 }

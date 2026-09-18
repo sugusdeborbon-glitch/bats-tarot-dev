@@ -1428,7 +1428,7 @@ function initSW(){
 }
 
 var ADMIN_URL_KEY="b3a2b557191caaaf8e5c246b";
-var _adminState={config:null,defaults:null,available:null,systemDefaults:null,pendingOrder:null,pendingOn:null,aiFlags:null};
+var _adminState={config:null,defaults:null,available:null,providerInfo:null,providerHealth:null,systemDefaults:null,pendingOrder:null,pendingOn:null,aiFlags:null,pendingModels:null};
 var ADMIN_SISTEMAS_CFGKEY={
   diaria:"systemDiaria",
   rel:"systemRel",
@@ -1458,12 +1458,15 @@ function adminEntrar(token){
   adminGetConfig(token).then(function(data){
     adminSetToken(token);
     _adminState.config=data.config||{};
-    _adminState.defaults=data.defaults||["groq","sambanova","google","openrouter","nvidia"];
+    _adminState.defaults=data.defaults||["groq","google","openrouter","mistral"];
     _adminState.available=data.available||[];
+    _adminState.providerInfo=data.providerInfo||[];
+    _adminState.providerHealth=data.providerHealth||{};
     _adminState.systemDefaults=data.systemDefaults||{};
     _adminState.aiFlags=data.aiFlags||{useCorta:true,useLarga:true};
     _adminState.pendingOrder=null;
     _adminState.pendingOn=null;
+    _adminState.pendingModels=null;
     document.getElementById("admin-box").style.display="none";
     document.getElementById("admin-pass").value="";
     document.getElementById("admin-panel").style.display="block";
@@ -1479,6 +1482,7 @@ function adminCerrar(){
   _adminState.config=null;
   _adminState.pendingOrder=null;
   _adminState.pendingOn=null;
+  _adminState.pendingModels=null;
   document.getElementById("admin-panel").style.display="none";
   document.getElementById("admin-box").style.display="block";
   adminMsg("");
@@ -1523,18 +1527,77 @@ function adminPoblar(){
   var cfg=_adminState.config||{};
   var order=adminOrdenActual();
   var on=_adminState.pendingOn||cfg.providersOn||{};
-  var names=adminNombres();
-  var html="";
+  var pinfo=_adminState.providerInfo||[];
+  var health=_adminState.providerHealth||{};
+  var provCfg=(_adminState.pendingModels)||(cfg.providers||{});
+  var infoMap={};
+  pinfo.forEach(function(p){infoMap[p.id]=p});
+  var cont=document.getElementById("admin-proveedores");
+  if(!cont) return;
+  cont.innerHTML="";
   order.forEach(function(id,i){
-    html+='<div class="admin-prov" style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.08)">'
-      +'<span style="opacity:.5;width:16px">'+(i+1)+'</span>'
-      +'<input type="checkbox" id="admin-on-'+id+'" '+(on[id]===false?"":"checked")+' onchange="adminCambio()" style="width:auto">'
-      +'<span style="flex:1;text-align:left">'+names[id]+'</span>'
-      +'<button class="btn btn-outline btn-sm" onclick="adminMover('+i+',-1)" '+(i===0?"disabled":"")+'>\u25B2</button>'
-      +'<button class="btn btn-outline btn-sm" onclick="adminMover('+i+',1)" '+(i===order.length-1?"disabled":"")+'>\u25BC</button>'
-      +'</div>';
+    var info=infoMap[id]||{};
+    var h=health[id]||{};
+    var custom=provCfg[id]||{};
+    var modelName=custom.model||info.model||id;
+    var label=custom.label||info.name||id;
+    var hasKey=info.hasKey||false;
+    var isActive=on[id]!==false;
+    var lastOk=h.ok===true;
+    var hasTest=!!h.lastTest;
+    var row=document.createElement("div");
+    row.className="admin-prov";
+    row.style.cssText="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08);flex-wrap:wrap";
+    var num=document.createElement("span");
+    num.style.cssText="opacity:.5;width:16px";
+    num.textContent=i+1;
+    row.appendChild(num);
+    var chk=document.createElement("input");
+    chk.type="checkbox";
+    chk.id="admin-on-"+id;
+    if(isActive) chk.checked=true;
+    chk.style.width="auto";
+    chk.onchange=adminCambio;
+    row.appendChild(chk);
+    var infoCol=document.createElement("span");
+    infoCol.style.cssText="flex:1;text-align:left;min-width:120px";
+    var modelEl=document.createElement("strong");
+    modelEl.style.cssText="display:block;font-size:.9em;color:var(--gold,#c9a45c)";
+    modelEl.textContent=modelName;
+    infoCol.appendChild(modelEl);
+    var detailEl=document.createElement("span");
+    detailEl.style.cssText="font-size:.75em;opacity:.7";
+    detailEl.textContent="Proveedor: "+label+(hasKey?"":" \u2014 sin key");
+    infoCol.appendChild(detailEl);
+    row.appendChild(infoCol);
+    var statusEl=document.createElement("span");
+    statusEl.style.cssText="font-size:.75em;min-width:60px;text-align:center";
+    if(!hasKey){statusEl.textContent="\u2718 sin key";statusEl.style.color="var(--danger,#e74c3c)"}
+    else if(!isActive){statusEl.textContent="off";statusEl.style.color="var(--muted,#888)"}
+    else if(hasTest&&lastOk){statusEl.textContent="\u2713 OK";statusEl.style.color="#2ecc71"}
+    else if(hasTest&&!lastOk){statusEl.textContent="\u2718 fallo";statusEl.style.color="var(--danger,#e74c3c)"}
+    else{statusEl.textContent="sin probar";statusEl.style.color="var(--muted,#888)"}
+    row.appendChild(statusEl);
+    var testBtn=document.createElement("button");
+    testBtn.className="btn btn-outline btn-sm";
+    testBtn.textContent="Probar";
+    testBtn.disabled=!hasKey||!isActive;
+    testBtn.onclick=(function(pid){return function(){adminTestProvider(pid)}})(id);
+    row.appendChild(testBtn);
+    var upBtn=document.createElement("button");
+    upBtn.className="btn btn-outline btn-sm";
+    upBtn.textContent="\u25B2";
+    if(i===0)upBtn.disabled=true;
+    upBtn.onclick=(function(ii){return function(){adminMover(ii,-1)}})(i);
+    row.appendChild(upBtn);
+    var dnBtn=document.createElement("button");
+    dnBtn.className="btn btn-outline btn-sm";
+    dnBtn.textContent="\u25BC";
+    if(i===order.length-1)dnBtn.disabled=true;
+    dnBtn.onclick=(function(ii){return function(){adminMover(ii,1)}})(i);
+    row.appendChild(dnBtn);
+    cont.appendChild(row);
   });
-  document.getElementById("admin-proveedores").innerHTML=html;
   document.getElementById("admin-temp").value=cfg.temperature!=null?cfg.temperature:0.7;
   adminTempVal();
   document.getElementById("admin-len").value=cfg.lenDefault||"media";
@@ -1547,6 +1610,30 @@ function adminPoblar(){
     var elS=document.getElementById("admin-sys-"+g);
     if(!elS) continue;
     elS.value=cfg[ADMIN_SISTEMAS_CFGKEY[g]]!=null?cfg[ADMIN_SISTEMAS_CFGKEY[g]]:((_adminState.systemDefaults||{})[g]||"");
+  }
+  var modelCont=document.getElementById("admin-model-fields");
+  if(modelCont){
+    modelCont.innerHTML="";
+    order.forEach(function(id){
+      var info=infoMap[id]||{};
+      var custom=provCfg[id]||{};
+      var currentModel=custom.model||info.model||"";
+      var label=custom.label||info.name||id;
+      var row=document.createElement("div");
+      row.style.cssText="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.08)";
+      var lbl=document.createElement("label");
+      lbl.style.cssText="min-width:90px;font-size:.85em;font-weight:normal";
+      lbl.textContent=label;
+      row.appendChild(lbl);
+      var inp=document.createElement("input");
+      inp.type="text";
+      inp.id="admin-model-"+id;
+      inp.value=currentModel;
+      inp.style.cssText="flex:1;font-size:.85em";
+      inp.placeholder="modelo";
+      row.appendChild(inp);
+      modelCont.appendChild(row);
+    });
   }
 }
 function adminCambio(){
@@ -1603,12 +1690,106 @@ function adminRestaurarTodo(){
     _adminState.config={};
     _adminState.pendingOrder=null;
     _adminState.pendingOn=null;
+    _adminState.pendingModels=null;
     _adminState.aiFlags={useCorta:true,useLarga:true};
     if(typeof setAIFlagsLocal==="function") setAIFlagsLocal({useCorta:true,useLarga:true});
     adminPoblar();
     adminMsg("\u2713 Valores originales restaurados.");
   },function(e){
     adminMsg((e&&e.message)||"No se pudieron restaurar los valores.",true);
+  });
+}
+
+/* ============ PROVIDER MANAGEMENT ============ */
+
+function adminTestProvider(providerId){
+  var tok=adminGetToken();
+  if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
+  adminMsg("Probando "+providerId+"\u2026");
+  adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{provider:providerId}}).then(function(data){
+    var ok=data.ok;
+    var msg=(ok?"\u2713":"\u2718")+" "+providerId+": ";
+    if(ok){
+      msg+=data.status+" OK \u2014 "+data.latency+"ms";
+      if(data.modelReal) msg+=" \u2014 modelo: "+data.modelReal;
+    }else{
+      msg+=(data.error||data.status||"fallo")+" ("+(data.category||"")+")";
+    }
+    adminMsg(msg,!ok);
+    if(!_adminState.providerHealth) _adminState.providerHealth={};
+    _adminState.providerHealth[providerId]=data;
+    adminPoblar();
+  },function(e){
+    adminMsg("Error al probar "+providerId+": "+(e&&e.message||"desconocido"),true);
+  });
+}
+function adminTestAll(){
+  if(!confirm("\u00bfProbar todos los proveedores activos? Esto realizar\u00e1 llamadas a la IA y puede consumir cuota.")) return;
+  var tok=adminGetToken();
+  if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
+  var order=adminOrdenActual();
+  var on=_adminState.pendingOn||(_adminState.config||{}).providersOn||{};
+  var active=order.filter(function(id){return on[id]!==false});
+  if(!active.length){adminMsg("No hay proveedores activos para probar",true);return}
+  adminMsg("Probando 0/"+active.length+"\u2026");
+  var idx=0;
+  function testNext(){
+    if(idx>=active.length){adminMsg("\u2713 Prueba completada");adminPoblar();return}
+    var pid=active[idx];
+    idx++;
+    adminMsg("Probando "+pid+" ("+idx+"/"+active.length+")\u2026");
+    adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{provider:pid}}).then(function(data){
+      if(!_adminState.providerHealth) _adminState.providerHealth={};
+      _adminState.providerHealth[pid]=data;
+      testNext();
+    },function(){
+      testNext();
+    });
+  }
+  testNext();
+}
+function adminLeerModels(){
+  var models={};
+  var order=adminOrdenActual();
+  order.forEach(function(id){
+    var el=document.getElementById("admin-model-"+id);
+    if(el&&el.value.trim()) models[id]={model:el.value.trim()};
+  });
+  return models;
+}
+function adminGuardar(){
+  var cfg={};
+  cfg.providerOrder=adminOrdenActual();
+  cfg.providersOn=adminLeerActivos();
+  cfg.temperature=parseFloat(document.getElementById("admin-temp").value);
+  cfg.maxTokens=parseInt(document.getElementById("admin-maxtok").value,10)||4096;
+  cfg.lenDefault=document.getElementById("admin-len").value;
+  var elUC=document.getElementById("admin-use-corta"),elUL=document.getElementById("admin-use-larga");
+  cfg.useCorta=elUC?elUC.checked:true;
+  cfg.useLarga=elUL?elUL.checked:true;
+  var models=adminLeerModels();
+  if(Object.keys(models).length) cfg.providers=models;
+  for(var g in ADMIN_SISTEMAS_CFGKEY){
+    var elS=document.getElementById("admin-sys-"+g);
+    if(!elS) continue;
+    var val=elS.value;
+    if(val!==(_adminState.systemDefaults||{})[g]) cfg[ADMIN_SISTEMAS_CFGKEY[g]]=val;
+  }
+  var tok=adminGetToken();
+  adminMsg("Guardando\u2026");
+  adminSaveConfig(tok,cfg).then(function(data){
+    _adminState.config=data.config||cfg;
+    _adminState.pendingOrder=null;
+    _adminState.pendingOn=null;
+    _adminState.pendingModels=null;
+    if(data.config){
+      _adminState.aiFlags={useCorta:data.config.useCorta!==false,useLarga:data.config.useLarga!==false};
+    }
+    if(typeof setAIFlagsLocal==="function") setAIFlagsLocal(_adminState.aiFlags);
+    adminPoblar();
+    adminMsg("\u2713 Cambios guardados. Ya est\u00e1n aplicados para todas las tiradas.");
+  },function(e){
+    adminMsg((e&&e.message)||"No se pudieron guardar los cambios.",true);
   });
 }
 

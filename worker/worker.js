@@ -1,15 +1,11 @@
 const GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
 const GOOGLE_MODEL = "gemini-3.6-flash";
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
-const NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
-const NVIDIA_MODEL = "meta/llama-3.1-8b-instruct";
-const SAMBANOVA_URL = "https://api.sambanova.ai/v1/chat/completions";
-const SAMBANOVA_MODEL = "Meta-Llama-3.3-70B-Instruct";
+const GROQ_MODEL = "qwen/qwen3.6-27b";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 const OPENROUTER_MODEL = "openrouter/free";
 const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
-const MISTRAL_MODEL = "mistral-small-latest";
+const MISTRAL_MODEL = "ministral-14b-latest";
 const ALLOWED_ORIGINS = [
   "https://sugusdeborbon-glitch.github.io",
   "null"
@@ -64,13 +60,11 @@ function sistemaPorTipo(tipo) {
 
 const PROVIDERS = [
   { id: "groq", name: "Groq", url: GROQ_URL, model: GROQ_MODEL, keyEnv: "GROQ_API_KEY" },
-  { id: "sambanova", name: "SambaNova", url: SAMBANOVA_URL, model: SAMBANOVA_MODEL, keyEnv: "SAMBANOVA_API_KEY" },
   { id: "google", name: "Google", url: GOOGLE_URL, model: GOOGLE_MODEL, keyEnv: "GOOGLE_API_KEY", googleThinking: "low" },
   { id: "openrouter", name: "OpenRouter", url: OPENROUTER_URL, model: OPENROUTER_MODEL, keyEnv: "OPENROUTER_API_KEY" },
-  { id: "nvidia", name: "NVIDIA", url: NVIDIA_URL, model: NVIDIA_MODEL, keyEnv: "NVIDIA_API_KEY" },
   { id: "mistral", name: "Mistral", url: MISTRAL_URL, model: MISTRAL_MODEL, keyEnv: "MISTRAL_API_KEY" }
 ];
-const DEFAULT_ORDER = ["groq", "sambanova", "google", "openrouter", "nvidia"];
+const DEFAULT_ORDER = ["groq", "google", "openrouter", "mistral"];
 
 const hits = new Map();
 
@@ -124,6 +118,7 @@ async function getConfig(env) {
 function buildProviders(env, cfg) {
   const order = Array.isArray(cfg.providerOrder) && cfg.providerOrder.length ? cfg.providerOrder : DEFAULT_ORDER;
   const on = cfg.providersOn || {};
+  const providersCfg = cfg.providers || {};
   const list = [];
   for (const id of order) {
     const meta = PROVIDERS.find(function(p){ return p.id === id; });
@@ -131,7 +126,15 @@ function buildProviders(env, cfg) {
     if (on[id] === false) continue;
     const key = env[meta.keyEnv];
     if (!key) continue;
-    list.push({ name: meta.name, url: meta.url, key: key, model: meta.model, googleThinking: meta.googleThinking });
+    const custom = providersCfg[id] || {};
+    list.push({
+      name: meta.name,
+      id: meta.id,
+      url: meta.url,
+      model: custom.model || meta.model,
+      key: key,
+      googleThinking: (custom.extra && custom.extra.thinking_level) || meta.googleThinking
+    });
   }
   return list;
 }
@@ -139,6 +142,23 @@ function buildProviders(env, cfg) {
 function availableProviders(env) {
   return PROVIDERS.map(function(p){
     return { id: p.id, name: p.name, available: !!env[p.keyEnv] };
+  });
+}
+
+function providerStatus(env, cfg) {
+  const providersCfg = cfg.providers || {};
+  const on = cfg.providersOn || {};
+  return PROVIDERS.map(function(p){
+    const custom = providersCfg[p.id] || {};
+    return {
+      id: p.id,
+      name: p.name,
+      hasKey: !!env[p.keyEnv],
+      active: on[p.id] !== false,
+      model: custom.model || p.model,
+      modelSource: custom.model ? "kv" : "default",
+      label: custom.label || p.name
+    };
   });
 }
 
@@ -187,6 +207,28 @@ function sanitizeConfig(body) {
     }
     cfg.providersOn = on;
   }
+  if (body.providers && typeof body.providers === "object") {
+    const provCfg = {};
+    for (const p of PROVIDERS) {
+      const incoming = body.providers[p.id];
+      if (!incoming || typeof incoming !== "object") continue;
+      const clean = {};
+      if (typeof incoming.model === "string" && incoming.model.trim()) {
+        clean.model = incoming.model.trim().slice(0, 200);
+      }
+      if (typeof incoming.label === "string" && incoming.label.trim()) {
+        clean.label = incoming.label.trim().slice(0, 50);
+      }
+      if (incoming.extra && typeof incoming.extra === "object") {
+        clean.extra = {};
+        if (typeof incoming.extra.thinking_level === "string") {
+          clean.extra.thinking_level = incoming.extra.thinking_level;
+        }
+      }
+      if (Object.keys(clean).length) provCfg[p.id] = clean;
+    }
+    if (Object.keys(provCfg).length) cfg.providers = provCfg;
+  }
   for (const k of ["systemDiaria", "systemRel", "systemLaboral", "systemAprendizaje", "systemPers", "systemAV", "systemLarga"]) {
     if (typeof body[k] === "string") cfg[k] = body[k];
   }
@@ -215,7 +257,12 @@ export default {
       }
       if (req.method === "GET") {
         const cfg = await getConfig(env);
-        return json({ config: cfg, available: availableProviders(env), defaults: DEFAULT_ORDER, systemDefaults: SISTEMAS, aiFlags: { useCorta: typeof cfg.useCorta === "boolean" ? cfg.useCorta : DEFAULT_USE_CORTA, useLarga: typeof cfg.useLarga === "boolean" ? cfg.useLarga : DEFAULT_USE_LARGA } }, 200, req);
+        let health = {};
+        try {
+          const raw = await env.CONFIG.get("provider_health");
+          health = raw ? JSON.parse(raw) : {};
+        } catch (e) { /* ignore */ }
+        return json({ config: cfg, available: availableProviders(env), providerInfo: providerStatus(env, cfg), providerHealth: health, defaults: DEFAULT_ORDER, systemDefaults: SISTEMAS, aiFlags: { useCorta: typeof cfg.useCorta === "boolean" ? cfg.useCorta : DEFAULT_USE_CORTA, useLarga: typeof cfg.useLarga === "boolean" ? cfg.useLarga : DEFAULT_USE_LARGA } }, 200, req);
       }
       if (req.method === "PUT") {
         let body;
@@ -240,6 +287,97 @@ export default {
         useCorta: typeof cfg.useCorta === "boolean" ? cfg.useCorta : DEFAULT_USE_CORTA,
         useLarga: typeof cfg.useLarga === "boolean" ? cfg.useLarga : DEFAULT_USE_LARGA
       }, 200, req);
+    }
+
+    if (url.pathname === "/api/provider-status") {
+      if (req.method !== "GET") {
+        return json({ error: "Método no permitido" }, 405, req);
+      }
+      if (req.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) {
+        return json({ error: "No autorizado" }, 401, req);
+      }
+      const cfg = await getConfig(env);
+      const providersCfg = cfg.providers || {};
+      const on = cfg.providersOn || {};
+      const status = {};
+      for (const p of PROVIDERS) {
+        const custom = providersCfg[p.id] || {};
+        status[p.id] = {
+          id: p.id,
+          name: p.name,
+          hasKey: !!env[p.keyEnv],
+          active: on[p.id] !== false,
+          model: custom.model || p.model,
+          modelSource: custom.model ? "kv" : "default",
+          label: custom.label || p.name,
+          url: p.url
+        };
+      }
+      return json({ providers: status, order: cfg.providerOrder || DEFAULT_ORDER, defaults: DEFAULT_ORDER }, 200, req);
+    }
+
+    if (url.pathname === "/api/provider-test") {
+      if (req.method !== "POST") {
+        return json({ error: "Método no permitido" }, 405, req);
+      }
+      if (req.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) {
+        return json({ error: "No autorizado" }, 401, req);
+      }
+      let body;
+      try {
+        body = await req.json();
+      } catch (e) {
+        return json({ error: "Cuerpo JSON inválido" }, 400, req);
+      }
+      const providerId = typeof body.provider === "string" ? body.provider : "";
+      if (!providerId) {
+        return json({ error: "Falta el campo provider" }, 400, req);
+      }
+      const cfg = await getConfig(env);
+      const providers = buildProviders(env, cfg);
+      const target = providers.find(function(p){ return p.id === providerId; });
+      if (!target) {
+        return json({ error: "Proveedor no disponible: " + providerId }, 400, req);
+      }
+      const testMessages = [{ role: "user", content: "PING" }];
+      const t0 = Date.now();
+      const res = await llamarProveedor(target, testMessages, { temperature: 0.7, max_tokens: 5 });
+      const latency = Date.now() - t0;
+      const healthEntry = {
+        lastTest: new Date().toISOString(),
+        ok: res.ok,
+        status: res.status || 0,
+        latency: latency,
+        model: target.model,
+        modelReal: res.modelReal || null,
+        provider: target.name
+      };
+      if (!res.ok) {
+        healthEntry.error = res.err;
+        healthEntry.category = res.category || "unknown";
+      }
+      try {
+        const raw = await env.CONFIG.get("provider_health");
+        const health = raw ? JSON.parse(raw) : {};
+        health[providerId] = healthEntry;
+        await env.CONFIG.put("provider_health", JSON.stringify(health));
+      } catch (e) { /* health storage best-effort */ }
+      return json(healthEntry, 200, req);
+    }
+
+    if (url.pathname === "/api/provider-health") {
+      if (req.method !== "GET") {
+        return json({ error: "Método no permitido" }, 405, req);
+      }
+      if (req.headers.get("X-Admin-Token") !== env.ADMIN_TOKEN) {
+        return json({ error: "No autorizado" }, 401, req);
+      }
+      try {
+        const raw = await env.CONFIG.get("provider_health");
+        return json(raw ? JSON.parse(raw) : {}, 200, req);
+      } catch (e) {
+        return json({}, 200, req);
+      }
     }
 
     if (url.pathname === TTS_ENDPOINT) {
@@ -344,16 +482,19 @@ export default {
     };
 
     let last = null;
+    const errors = [];
     for (const provider of providers) {
       const res = await llamarProveedor(provider, msgs, payload);
       if (res.ok) {
-        return json({ content: res.content, provider: provider.name, modelo: provider.model }, 200, req, provider.name);
+        return json({ content: res.content, provider: provider.name, modelo: provider.model, modeloReal: res.modelReal || null }, 200, req, provider.name);
       }
       last = res;
+      errors.push(provider.name + ": " + res.err + " [" + (res.category || "unknown") + "]");
     }
     if (last) {
       const status = last.status && last.status >= 400 ? last.status : 502;
-      return json({ error: last.err }, status, req);
+      const summary = "Todos los proveedores fallaron (" + providers.length + "): " + errors.join(" | ");
+      return json({ error: summary }, status, req);
     }
     return json({ error: "Error desconocido del proveedor" }, 502, req);
   }
@@ -429,24 +570,42 @@ async function llamarProveedor(provider, messages, payload) {
       body: JSON.stringify(bodyObj),
       signal: ctrl.signal
     });
-    const data = await upstream.json();
+    let data;
+    try {
+      data = await upstream.json();
+    } catch (parseErr) {
+      return {
+        ok: false,
+        status: upstream.status,
+        err: provider.name + " (" + upstream.status + "): respuesta no JSON del upstream",
+        category: "parse_error"
+      };
+    }
     if (!upstream.ok) {
       const detalle = data && data.error
         ? (data.error.message || data.error.status || JSON.stringify(data.error))
         : (data && data.error_type ? data.error_type : JSON.stringify(data).slice(0, 300));
+      let category = "provider_error";
+      if (upstream.status === 429) category = "rate_limited";
+      else if (upstream.status >= 500) category = "server_error";
+      else if (upstream.status === 408) category = "timeout";
       return {
         ok: false,
         status: upstream.status,
-        err: provider.name + " (" + upstream.status + "): " + detalle
+        err: provider.name + " (" + upstream.status + "): " + detalle,
+        category: category
       };
     }
     const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     if (!content || content.length < 80) {
-      return { ok: false, status: 502, err: "Respuesta vacía o demasiado corta de " + provider.name };
+      return { ok: false, status: 502, err: "Respuesta vacía o demasiado corta de " + provider.name, category: "empty_response" };
     }
-    return { ok: true, status: upstream.status, content: content };
+    return { ok: true, status: upstream.status, content: content, modelReal: data.model || null };
   } catch (e) {
-    return { ok: false, status: 0, err: provider.name + ": la petición tardó demasiado o falló la conexión." };
+    if (e && e.name === "AbortError") {
+      return { ok: false, status: 504, err: provider.name + ": la petición excedió el tiempo de espera (40s).", category: "timeout" };
+    }
+    return { ok: false, status: 502, err: provider.name + ": error de red — " + (e && e.message || "desconocido"), category: "network_error" };
   } finally {
     clearTimeout(timer);
   }
