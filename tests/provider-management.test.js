@@ -4,6 +4,7 @@
  * modeloReal, secrets protection, fallback, edge cases
  */
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 
 // ── Constants matching worker.js ──
 
@@ -489,5 +490,253 @@ describe("edge cases", function() {
     };
     const list = buildProviders(env, cfg);
     expect(list[0].extra.thinking_level).toBe("high");
+  });
+});
+
+describe("admin model edit persistence — bug fix", function() {
+  it("edited model survives test cycle (read → edit → test → read)", function() {
+    const pendingProviders = [
+      { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile", secretRef: "GROQ_API_KEY", enabled: true, extra: {} }
+    ];
+
+    const editedModel = "qwen/qwen3.8-27b";
+
+    pendingProviders[0].model = editedModel;
+
+    expect(pendingProviders[0].model).toBe(editedModel);
+
+    const providerConfig = {
+      id: pendingProviders[0].id,
+      name: pendingProviders[0].name,
+      url: pendingProviders[0].url,
+      model: pendingProviders[0].model,
+      secretRef: pendingProviders[0].secretRef,
+      extra: pendingProviders[0].extra || {}
+    };
+    expect(providerConfig.model).toBe(editedModel);
+
+    pendingProviders[0].model = "llama-3.3-70b-versatile";
+
+    expect(pendingProviders[0].model).not.toBe(editedModel);
+  });
+
+  it("adminLeerProviders sync reads from DOM inputs into pendingProviders", function() {
+    const original = { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile", secretRef: "GROQ_API_KEY", enabled: true, extra: {} };
+    const pending = [Object.assign({}, original)];
+
+    const inputs = {
+      "prov-name-0": "Groq",
+      "prov-url-0": "https://api.groq.com/openai/v1/chat/completions",
+      "prov-model-0": "qwen/qwen3.8-27b",
+      "prov-secret-0": "GROQ_API_KEY",
+      "prov-enabled-0": true
+    };
+
+    const synced = pending.map(function(p, i) {
+      const copy = Object.assign({}, p);
+      if (inputs["prov-name-" + i] !== undefined) copy.name = inputs["prov-name-" + i];
+      if (inputs["prov-url-" + i] !== undefined) copy.url = inputs["prov-url-" + i];
+      if (inputs["prov-model-" + i] !== undefined) copy.model = inputs["prov-model-" + i];
+      if (inputs["prov-secret-" + i] !== undefined) copy.secretRef = inputs["prov-secret-" + i];
+      if (inputs["prov-enabled-" + i] !== undefined) copy.enabled = inputs["prov-enabled-" + i];
+      return copy;
+    });
+
+    expect(synced[0].model).toBe("qwen/qwen3.8-27b");
+    expect(synced[0].model).not.toBe("llama-3.3-70b-versatile");
+    expect(pending[0].model).toBe("llama-3.3-70b-versatile");
+  });
+
+  it("testProvider sends edited model, not original", function() {
+    const providers = [
+      { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions", model: "qwen/qwen3.8-27b", secretRef: "GROQ_API_KEY", enabled: true, extra: {} }
+    ];
+
+    const p = providers[0];
+    const providerConfig = {
+      id: p.id, name: p.name, url: p.url,
+      model: p.model, secretRef: p.secretRef, extra: p.extra || {}
+    };
+
+    expect(providerConfig.model).toBe("qwen/qwen3.8-27b");
+  });
+});
+
+// ── Regression: blur must NOT revert edited model (REAL app.js code) ──
+// Carga el código real del Admin (app.js) y simula blur/change sobre los
+// inputs de proveedores. Antes de la corrección, onchange=adminCambio()
+// ejecutaba adminPoblar() que re-aplicaba value desde pendingProviders
+// (estado viejo) y revertía el campo (ej: llama-3.3-70b-versatile).
+
+const APP_JS_PATH = new URL("../app.js", import.meta.url);
+
+function makeFakeDoc() {
+  const reg = new Map();
+  const clearReg = () => { reg.clear(); };
+  function fakeEl(tag) {
+    const el = {
+      id: undefined, type: "", value: "", checked: false,
+      placeholder: "", className: "", disabled: false,
+      textContent: "", children: [], onchange: null, onclick: null,
+      _html: "", style: {},
+      appendChild(child) {
+        this.children.push(child);
+        if (child.id) reg.set(child.id, child);
+        return child;
+      }
+    };
+    Object.defineProperty(el, "innerHTML", {
+      get() { return this._html; },
+      set(v) {
+        this._html = v;
+        if (v === "") clearReg();
+      }
+    });
+    return el;
+  }
+  return {
+    createElement: fakeEl,
+    getElementById(id) {
+      if (!reg.has(id) && /^admin-/.test(id)) {
+        const el = fakeEl(id);
+        if (id === "admin-temp") el.value = "0.7";
+        reg.set(id, el);
+      }
+      return reg.get(id);
+    }
+  };
+}
+
+function loadAdminModule(doc, deps) {
+  const src = readFileSync(APP_JS_PATH, "utf8");
+  const start = src.indexOf("var _adminState=");
+  const end = src.indexOf("/* ============ LECTURA POR VOZ");
+  if (start < 0 || end < 0 || end <= start) throw new Error("admin chunk not found in app.js");
+  const chunk = src.slice(start, end);
+  const factory = new Function(
+    "document", "window", "location", "URLSearchParams",
+    "adminGetToken", "adminSetToken", "adminClearToken",
+    "adminGetConfig", "adminSaveConfig", "adminFetch", "toast",
+    chunk +
+    "\nreturn {adminPoblar:adminPoblar,adminLeerProviders:adminLeerProviders,adminCambio:adminCambio," +
+    "adminMover:adminMover,adminQuitar:adminQuitar,adminAnadir:adminAnadir," +
+    "adminTestProvider:adminTestProvider,adminTestAll:adminTestAll,_adminState:_adminState};"
+  );
+  deps = deps || {};
+  return factory(
+    doc, {}, { search: "" }, class {},
+    deps.adminGetToken || (() => null),
+    deps.adminSetToken || (() => {}),
+    deps.adminClearToken || (() => {}),
+    deps.adminGetConfig || (() => Promise.reject(new Error("no config"))),
+    deps.adminSaveConfig || (() => Promise.resolve({ config: {} })),
+    deps.adminFetch || (() => Promise.resolve({})),
+    deps.toast || (() => {})
+  );
+}
+
+describe("admin blur regression — REAL app.js code", function() {
+  it("blur tras editar Modelo conserva qwen/qwen3.8-27b (no revierte a llama)", function() {
+    const doc = makeFakeDoc();
+    const api = loadAdminModule(doc, {});
+    api._adminState.pendingProviders = [
+      { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions",
+        model: "llama-3.3-70b-versatile", secretRef: "GROQ_API_KEY", enabled: true, hasKey: true, extra: {} }
+    ];
+    api._adminState.providerHealth = {};
+    api._adminState.config = {};
+    api.adminPoblar();
+
+    const input = doc.getElementById("prov-model-0");
+    expect(input, "prov-model-0 debe existir tras adminPoblar").toBeTruthy();
+    expect(input.value).toBe("llama-3.3-70b-versatile");
+
+    input.value = "qwen/qwen3.8-27b";
+
+    if (typeof input.onchange === "function") input.onchange.call(input);
+
+    expect(doc.getElementById("prov-model-0").value).toBe("qwen/qwen3.8-27b");
+  });
+
+  it("blur no revierte ningún campo editable (name/url/model/secret)", function() {
+    const doc = makeFakeDoc();
+    const api = loadAdminModule(doc, {});
+    api._adminState.pendingProviders = [
+      { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions",
+        model: "llama-3.3-70b-versatile", secretRef: "GROQ_API_KEY", enabled: true, hasKey: true, extra: {} }
+    ];
+    api._adminState.providerHealth = {};
+    api._adminState.config = {};
+    api.adminPoblar();
+
+    doc.getElementById("prov-name-0").value = "GroqEditado";
+    doc.getElementById("prov-url-0").value = "https://edge.groq.com/v1";
+    doc.getElementById("prov-model-0").value = "qwen/qwen3.8-27b";
+    doc.getElementById("prov-secret-0").value = "GROQ_API_KEY_2";
+
+    // Simulación fiel de blur: el navegador dispara `change` si existe
+    // listener. Tras la corrección los inputs de texto NO tienen onchange,
+    // por lo que nada re-renderiza ni sobreescribe el valor editado.
+    ["prov-name-0", "prov-url-0", "prov-model-0", "prov-secret-0"].forEach(function(id) {
+      const el = doc.getElementById(id);
+      if (typeof el.onchange === "function") el.onchange.call(el);
+    });
+
+    expect(doc.getElementById("prov-model-0").value).toBe("qwen/qwen3.8-27b");
+    expect(doc.getElementById("prov-name-0").value).toBe("GroqEditado");
+    expect(doc.getElementById("prov-url-0").value).toBe("https://edge.groq.com/v1");
+    expect(doc.getElementById("prov-secret-0").value).toBe("GROQ_API_KEY_2");
+  });
+
+  it("toggle de activación actualiza estado + label sin sobrescribir el modelo editado", function() {
+    const doc = makeFakeDoc();
+    const api = loadAdminModule(doc, {});
+    api._adminState.pendingProviders = [
+      { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions",
+        model: "llama-3.3-70b-versatile", secretRef: "GROQ_API_KEY", enabled: true, hasKey: true, extra: {} }
+    ];
+    api._adminState.providerHealth = {};
+    api._adminState.config = {};
+    api.adminPoblar();
+
+    doc.getElementById("prov-model-0").value = "qwen/qwen3.8-27b";
+    const chk = doc.getElementById("prov-enabled-0");
+    expect(chk.checked).toBe(true);
+    chk.checked = false;
+    chk.onchange.call(chk);
+
+    expect(api._adminState.pendingProviders[0].enabled).toBe(false);
+    expect(doc.getElementById("prov-status-0").textContent).toBe("off");
+    expect(doc.getElementById("prov-model-0").value).toBe("qwen/qwen3.8-27b");
+  });
+
+  it("adminTestProvider envía el modelo editado y lo conserva tras re-render", async function() {
+    const doc = makeFakeDoc();
+    let capturedBody = null;
+    let capturedEndpoint = null;
+    const api = loadAdminModule(doc, {
+      adminGetToken: () => "tok",
+      adminFetch: (method, token, opts) => {
+        capturedEndpoint = opts.endpoint;
+        capturedBody = opts.body;
+        return Promise.resolve({ ok: true, status: 200, latency: 5, modelReal: "qwen/qwen3.8-27b" });
+      }
+    });
+    api._adminState.pendingProviders = [
+      { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions",
+        model: "llama-3.3-70b-versatile", secretRef: "GROQ_API_KEY", enabled: true, hasKey: true, extra: {} }
+    ];
+    api._adminState.providerHealth = {};
+    api._adminState.config = {};
+    api.adminPoblar();
+
+    doc.getElementById("prov-model-0").value = "qwen/qwen3.8-27b";
+
+    api.adminTestProvider(0);
+    await new Promise(function(resolve) { setTimeout(resolve, 0); });
+
+    expect(capturedEndpoint).toBe("/api/provider-test");
+    expect(capturedBody.providerConfig.model).toBe("qwen/qwen3.8-27b");
+    expect(doc.getElementById("prov-model-0").value).toBe("qwen/qwen3.8-27b");
   });
 });

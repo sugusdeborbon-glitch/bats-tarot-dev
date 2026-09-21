@@ -1508,8 +1508,21 @@ function adminNombres(){
   (_adminState.available||[]).forEach(function(p){names[p.id]=p.nombre||p.name||p.id});
   return names;
 }
-function adminCambio(){
-  adminPoblar();
+function adminCambio(i){
+  _adminState.pendingProviders=adminLeerProviders();
+  var p=(_adminState.pendingProviders||[])[i];
+  if(!p) return;
+  var statusEl=document.getElementById("prov-status-"+i);
+  if(!statusEl) return;
+  var health=(_adminState.providerHealth||{})[p.id]||{};
+  var hasKey=p.hasKey||false;
+  var lastOk=health.ok===true;
+  var hasTest=!!health.lastTest;
+  if(!hasKey){statusEl.textContent="\u2718 sin key";statusEl.style.color="var(--danger,#e74c3c)"}
+  else if(p.enabled===false){statusEl.textContent="off";statusEl.style.color="var(--muted,#888)"}
+  else if(hasTest&&lastOk){statusEl.textContent="\u2713 OK";statusEl.style.color="#2ecc71"}
+  else if(hasTest&&!lastOk){statusEl.textContent="\u2718 fallo";statusEl.style.color="var(--danger,#e74c3c)"}
+  else{statusEl.textContent="sin probar";statusEl.style.color="var(--muted,#888)"}
 }
 function adminMover(i,dir){
   var providers=(_adminState.pendingProviders||[]).slice();
@@ -1619,7 +1632,8 @@ function adminRefresh(){
 function adminTestProvider(idx){
   var tok=adminGetToken();
   if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
-  var providers=_adminState.pendingProviders||(_adminState.providerInfo||[]);
+  _adminState.pendingProviders=adminLeerProviders();
+  var providers=_adminState.pendingProviders;
   var p=providers[idx];
   if(!p){adminMsg("Proveedor no encontrado",true);return}
   adminMsg("Probando "+(p.name||p.id)+"\u2026");
@@ -1644,7 +1658,8 @@ function adminTestAll(){
   if(!confirm("\u00bfProbar todos los proveedores activos? Esto realizar\u00e1 llamadas a la IA y puede consumir cuota.")) return;
   var tok=adminGetToken();
   if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
-  var providers=_adminState.pendingProviders||(_adminState.providerInfo||[]);
+  _adminState.pendingProviders=adminLeerProviders();
+  var providers=_adminState.pendingProviders;
   var active=providers.filter(function(p){return p.enabled!==false});
   if(!active.length){adminMsg("No hay proveedores activos para probar",true);return}
   adminMsg("Probando 0/"+active.length+"\u2026");
@@ -1692,7 +1707,7 @@ function adminPoblar(){
     chk.id="prov-enabled-"+i;
     if(isActive) chk.checked=true;
     chk.style.width="auto";
-    chk.onchange=adminCambio;
+    chk.onchange=(function(ii){return function(){adminCambio(ii)}})(i);
     header.appendChild(chk);
     var nameInp=document.createElement("input");
     nameInp.type="text";
@@ -1700,9 +1715,9 @@ function adminPoblar(){
     nameInp.value=p.name||"";
     nameInp.placeholder="Nombre";
     nameInp.style.cssText="flex:1;font-size:.85em;min-width:80px";
-    nameInp.onchange=adminCambio;
     header.appendChild(nameInp);
     var statusEl=document.createElement("span");
+    statusEl.id="prov-status-"+i;
     statusEl.style.cssText="font-size:.75em;min-width:60px;text-align:center";
     if(!hasKey){statusEl.textContent="\u2718 sin key";statusEl.style.color="var(--danger,#e74c3c)"}
     else if(!isActive){statusEl.textContent="off";statusEl.style.color="var(--muted,#888)"}
@@ -1719,7 +1734,6 @@ function adminPoblar(){
     urlInp.value=p.url||"";
     urlInp.placeholder="URL API (HTTPS)";
     urlInp.style.cssText="font-size:.85em";
-    urlInp.onchange=adminCambio;
     var urlLbl=document.createElement("label");
     urlLbl.style.cssText="opacity:.6;font-size:.75em";
     urlLbl.textContent="URL";
@@ -1731,7 +1745,6 @@ function adminPoblar(){
     modelInp.value=p.model||"";
     modelInp.placeholder="Modelo";
     modelInp.style.cssText="font-size:.85em";
-    modelInp.onchange=adminCambio;
     var modelLbl=document.createElement("label");
     modelLbl.style.cssText="opacity:.6;font-size:.75em";
     modelLbl.textContent="Modelo";
@@ -1743,7 +1756,6 @@ function adminPoblar(){
     secretInp.value=p.secretRef||"";
     secretInp.placeholder="Secret (ej: GROQ_API_KEY)";
     secretInp.style.cssText="font-size:.85em";
-    secretInp.onchange=adminCambio;
     var secretLbl=document.createElement("label");
     secretLbl.style.cssText="opacity:.6;font-size:.75em";
     secretLbl.textContent="Credencial";
