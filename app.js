@@ -1428,7 +1428,7 @@ function initSW(){
 }
 
 var ADMIN_URL_KEY="b3a2b557191caaaf8e5c246b";
-var _adminState={config:null,defaults:null,available:null,providerInfo:null,providerHealth:null,systemDefaults:null,pendingProviders:null,maxProviders:null,aiFlags:null};
+var _adminState={config:null,defaults:null,available:null,providerInfo:null,providerHealth:null,systemDefaults:null,draft:null,maxProviders:null,aiFlags:null};
 var ADMIN_SISTEMAS_CFGKEY={
   diaria:"systemDiaria",
   rel:"systemRel",
@@ -1465,7 +1465,7 @@ function adminEntrar(token){
     _adminState.systemDefaults=data.systemDefaults||{};
     _adminState.aiFlags=data.aiFlags||{useCorta:true,useLarga:true};
     _adminState.maxProviders=data.maxProviders||5;
-    _adminState.pendingProviders=null;
+    adminSembrarDraft();
     document.getElementById("admin-box").style.display="none";
     document.getElementById("admin-pass").value="";
     document.getElementById("admin-panel").style.display="block";
@@ -1479,7 +1479,7 @@ function adminEntrar(token){
 function adminCerrar(){
   adminClearToken();
   _adminState.config=null;
-  _adminState.pendingProviders=null;
+  _adminState.draft=null;
   document.getElementById("admin-panel").style.display="none";
   document.getElementById("admin-box").style.display="block";
   adminMsg("");
@@ -1508,65 +1508,132 @@ function adminNombres(){
   (_adminState.available||[]).forEach(function(p){names[p.id]=p.nombre||p.name||p.id});
   return names;
 }
-function adminCambio(i){
-  _adminState.pendingProviders=adminLeerProviders();
-  var p=(_adminState.pendingProviders||[])[i];
+/* ============ ESTADO EDITABLE DEL PROVIDER MANAGER ============
+   _adminState.draft es la ÚNICA fuente de verdad editable.
+   - Se siembra desde providerInfo en cada carga válida (adminEntrar / adminRefresh)
+     y se reemplaza EXPLÍCITAMENTE por el snapshot nuevo en cada refresh.
+   - Los inputs escriben directamente en el draft (sin re-render destructivo).
+   - Guardar y Probar serializan el draft; ninguna función de render lo reconstruye.
+================================================================ */
+function adminDraft(){
+  return _adminState.draft||[];
+}
+function adminClonProvider(p){
+  p=p||{};
+  var enabled=typeof p.enabled==="boolean"?p.enabled:(p.active!==false);
+  return {
+    id:p.id||("custom_"+Date.now()+"_"+Math.random().toString(36).slice(2,6)),
+    name:p.name||"",
+    url:p.url||"",
+    model:p.model||"",
+    secretRef:p.secretRef||"",
+    enabled:enabled,
+    hasKey:p.hasKey===true,
+    extra:(p.extra&&typeof p.extra==="object")?Object.assign({},p.extra):{}
+  };
+}
+/* El draft es una copia de trabajo: nunca comparte referencias con providerInfo. */
+function adminSembrarDraft(){
+  var info=Array.isArray(_adminState.providerInfo)?_adminState.providerInfo:[];
+  _adminState.draft=info.map(adminClonProvider);
+  return _adminState.draft;
+}
+function adminProviderConfig(p){
+  return {
+    id:p.id,
+    name:(p.name||"").trim(),
+    url:(p.url||"").trim(),
+    model:(p.model||"").trim(),
+    secretRef:(p.secretRef||"").trim(),
+    extra:p.extra||{}
+  };
+}
+/* Serializa el draft para el Worker. NUNCA descarta filas en silencio. */
+function adminSerializarDraft(){
+  return adminDraft().map(function(p){
+    var o={
+      id:p.id,
+      name:(p.name||"").trim(),
+      url:(p.url||"").trim(),
+      model:(p.model||"").trim(),
+      secretRef:(p.secretRef||"").trim(),
+      enabled:p.enabled!==false
+    };
+    if(p.extra&&Object.keys(p.extra).length) o.extra=Object.assign({},p.extra);
+    return o;
+  });
+}
+/* Devuelve null si el draft es guardable, o el mensaje exacto del problema. */
+function adminValidarDraft(){
+  var d=adminDraft();
+  if(!d.length) return "Debe haber al menos un proveedor";
+  for(var i=0;i<d.length;i++){
+    var p=d[i];
+    if(p.enabled===false) continue;
+    var falt=[];
+    if(!(p.url||"").trim()||!/^https:\/\//i.test((p.url||"").trim())) falt.push("URL (https)");
+    if(!(p.model||"").trim()) falt.push("Modelo");
+    if(!(p.secretRef||"").trim()) falt.push("Credencial");
+    if(falt.length) return "Proveedor "+(i+1)+" ("+(p.name||p.id)+"): falta "+falt.join(", ");
+  }
+  return null;
+}
+/* Escribe un campo del draft y refresca SOLO el label de estado de ese card. */
+function adminCambio(i,campo,valor){
+  var p=adminDraft()[i];
   if(!p) return;
-  var statusEl=document.getElementById("prov-status-"+i);
+  if(campo) p[campo]=valor;
+  adminPintarEstado(i);
+}
+/* Pinta el label de estado del card i. Acepta el elemento para poder usarse
+   también durante el render (cuando el nodo aún no está en el documento). */
+function adminPintarEstado(i,el){
+  var p=adminDraft()[i];
+  if(!p) return;
+  var statusEl=el||document.getElementById("prov-status-"+i);
   if(!statusEl) return;
   var health=(_adminState.providerHealth||{})[p.id]||{};
   var hasKey=p.hasKey||false;
   var lastOk=health.ok===true;
   var hasTest=!!health.lastTest;
-  if(!hasKey){statusEl.textContent="\u2718 sin key";statusEl.style.color="var(--danger,#e74c3c)"}
-  else if(p.enabled===false){statusEl.textContent="off";statusEl.style.color="var(--muted,#888)"}
-  else if(hasTest&&lastOk){statusEl.textContent="\u2713 OK";statusEl.style.color="#2ecc71"}
-  else if(hasTest&&!lastOk){statusEl.textContent="\u2718 fallo";statusEl.style.color="var(--danger,#e74c3c)"}
-  else{statusEl.textContent="sin probar";statusEl.style.color="var(--muted,#888)"}
+  var txt,color;
+  if(!hasKey){txt="\u2718 sin key";color="var(--danger,#e74c3c)"}
+  else if(p.enabled===false){txt="off";color="var(--muted,#888)"}
+  else if(hasTest&&lastOk){txt="\u2713 OK";color="#2ecc71"}
+  else if(hasTest&&!lastOk){txt="\u2718 fallo";color="var(--danger,#e74c3c)"}
+  else{txt="sin probar";color="var(--muted,#888)"}
+  statusEl.textContent=txt;
+  statusEl.style.color=color;
 }
 function adminMover(i,dir){
-  var providers=(_adminState.pendingProviders||[]).slice();
+  var providers=adminDraft().slice();
   var j=i+dir;
   if(j<0||j>=providers.length) return;
   var t=providers[i];providers[i]=providers[j];providers[j]=t;
-  _adminState.pendingProviders=providers;
+  _adminState.draft=providers;
   adminPoblar();
 }
 function adminQuitar(i){
-  var providers=(_adminState.pendingProviders||[]).slice();
+  var providers=adminDraft().slice();
   if(providers.length<=1){adminMsg("Debe haber al menos un proveedor",true);return}
   providers.splice(i,1);
-  _adminState.pendingProviders=providers;
+  _adminState.draft=providers;
   adminPoblar();
 }
 function adminAnadir(){
-  var providers=(_adminState.pendingProviders||[]).slice();
-  if(providers.length>=5){adminMsg("M\u00e1ximo 5 proveedores",true);return}
+  var providers=adminDraft().slice();
+  var maxP=_adminState.maxProviders||5;
+  if(providers.length>=maxP){adminMsg("M\u00e1ximo "+maxP+" proveedores",true);return}
   var n=providers.length+1;
-  providers.push({id:"custom_"+Date.now(),name:"Proveedor "+n,url:"https://",model:"",secretRef:"",enabled:false,extra:{}});
-  _adminState.pendingProviders=providers;
+  providers.push({id:"custom_"+Date.now().toString(36)+Math.random().toString(36).slice(2,6),name:"Proveedor "+n,url:"https://",model:"",secretRef:"",enabled:false,extra:{}});
+  _adminState.draft=providers;
   adminPoblar();
 }
-function adminLeerProviders(){
-  var providers=(_adminState.pendingProviders||[]).slice();
-  providers.forEach(function(p,i){
-    var elName=document.getElementById("prov-name-"+i);
-    var elUrl=document.getElementById("prov-url-"+i);
-    var elModel=document.getElementById("prov-model-"+i);
-    var elSecret=document.getElementById("prov-secret-"+i);
-    var elEnabled=document.getElementById("prov-enabled-"+i);
-    if(elName) p.name=elName.value.trim();
-    if(elUrl) p.url=elUrl.value.trim();
-    if(elModel) p.model=elModel.value.trim();
-    if(elSecret) p.secretRef=elSecret.value.trim();
-    if(elEnabled) p.enabled=elEnabled.checked;
-  });
-  return providers;
-}
 function adminGuardar(){
-  var providers=adminLeerProviders();
+  var err=adminValidarDraft();
+  if(err){adminMsg(err,true);return}
   var cfg={};
-  cfg.providers=providers;
+  cfg.providers=adminSerializarDraft();
   cfg.temperature=parseFloat(document.getElementById("admin-temp").value);
   cfg.maxTokens=parseInt(document.getElementById("admin-maxtok").value,10)||4096;
   cfg.lenDefault=document.getElementById("admin-len").value;
@@ -1582,17 +1649,27 @@ function adminGuardar(){
   var tok=adminGetToken();
   adminMsg("Guardando\u2026");
   adminSaveConfig(tok,cfg).then(function(data){
-    _adminState.config=data.config||cfg;
-    _adminState.pendingProviders=null;
-    if(data.config){
+    _adminState.config=(data&&data.config)||cfg;
+    if(data&&data.config){
       _adminState.aiFlags={useCorta:data.config.useCorta!==false,useLarga:data.config.useLarga!==false};
     }
     if(typeof setAIFlagsLocal==="function") setAIFlagsLocal(_adminState.aiFlags);
+    var warns=(data&&data.warnings)||[];
     adminRefresh();
-    adminMsg("\u2713 Cambios guardados. Ya est\u00e1n aplicados para todas las tiradas.");
+    var msg="\u2713 Cambios guardados. Ya est\u00e1n aplicados para todas las tiradas.";
+    if(warns.length) msg+=" \u26a0 El servidor descart\u00f3 "+warns.length+" proveedor(es): "+adminResumenWarnings(warns);
+    adminMsg(msg,warns.length>0);
   },function(e){
-    adminMsg((e&&e.message)||"No se pudieron guardar los cambios.",true);
+    var extra=(e&&e.details&&e.details.length)?" "+adminResumenWarnings(e.details):"";
+    adminMsg(((e&&e.message)||"No se pudieron guardar los cambios.")+extra,true);
   });
+}
+/* Nada se descarta en silencio: el Worker devuelve el detalle de lo rechazado. */
+function adminResumenWarnings(warns){
+  return (warns||[]).map(function(w){
+    var id=w&&w.id?w.id:("\u00edndice "+(w&&w.index));
+    return id+": "+((w&&w.reason)||"descartado");
+  }).join("; ");
 }
 function adminRestaurarSistema(g){
   var el=document.getElementById("admin-sys-"+g);
@@ -1603,7 +1680,6 @@ function adminRestaurarTodo(){
   var tok=adminGetToken();
   adminSaveConfig(tok,{}).then(function(){
     _adminState.config={};
-    _adminState.pendingProviders=null;
     _adminState.aiFlags={useCorta:true,useLarga:true};
     if(typeof setAIFlagsLocal==="function") setAIFlagsLocal({useCorta:true,useLarga:true});
     adminRefresh();
@@ -1625,19 +1701,17 @@ function adminRefresh(){
     _adminState.providerInfo=data.providerInfo||[];
     _adminState.providerHealth=data.providerHealth||{};
     _adminState.maxProviders=data.maxProviders||5;
-    _adminState.pendingProviders=null;
+    adminSembrarDraft();
     adminPoblar();
   },function(){});
 }
 function adminTestProvider(idx){
   var tok=adminGetToken();
   if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
-  _adminState.pendingProviders=adminLeerProviders();
-  var providers=_adminState.pendingProviders;
-  var p=providers[idx];
+  var p=adminDraft()[idx];
   if(!p){adminMsg("Proveedor no encontrado",true);return}
   adminMsg("Probando "+(p.name||p.id)+"\u2026");
-  adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{providerConfig:{id:p.id,name:p.name,url:p.url,model:p.model,secretRef:p.secretRef,extra:p.extra||{}}}}).then(function(data){
+  adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{providerConfig:adminProviderConfig(p)}}).then(function(data){
     var ok=data.ok;
     var msg=(ok?"\u2713":"\u2718")+" "+(p.name||p.id)+": ";
     if(ok){
@@ -1658,8 +1732,7 @@ function adminTestAll(){
   if(!confirm("\u00bfProbar todos los proveedores activos? Esto realizar\u00e1 llamadas a la IA y puede consumir cuota.")) return;
   var tok=adminGetToken();
   if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
-  _adminState.pendingProviders=adminLeerProviders();
-  var providers=_adminState.pendingProviders;
+  var providers=adminDraft();
   var active=providers.filter(function(p){return p.enabled!==false});
   if(!active.length){adminMsg("No hay proveedores activos para probar",true);return}
   adminMsg("Probando 0/"+active.length+"\u2026");
@@ -1669,7 +1742,7 @@ function adminTestAll(){
     var p=active[idx];
     idx++;
     adminMsg("Probando "+(p.name||p.id)+" ("+idx+"/"+active.length+")\u2026");
-    adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{providerConfig:{id:p.id,name:p.name,url:p.url,model:p.model,secretRef:p.secretRef,extra:p.extra||{}}}}).then(function(data){
+    adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{providerConfig:adminProviderConfig(p)}}).then(function(data){
       if(!_adminState.providerHealth) _adminState.providerHealth={};
       _adminState.providerHealth[p.id]=data;
       testNext();
@@ -1681,18 +1754,13 @@ function adminTestAll(){
 }
 function adminPoblar(){
   var cfg=_adminState.config||{};
-  var providers=_adminState.pendingProviders||(_adminState.providerInfo||[]);
-  var health=_adminState.providerHealth||{};
+  var providers=adminDraft();
   var maxP=_adminState.maxProviders||5;
   var cont=document.getElementById("admin-proveedores");
   if(!cont) return;
   cont.innerHTML="";
   providers.forEach(function(p,i){
-    var h=health[p.id]||{};
-    var hasKey=p.hasKey||false;
     var isActive=p.enabled!==false;
-    var lastOk=h.ok===true;
-    var hasTest=!!h.lastTest;
     var row=document.createElement("div");
     row.className="admin-prov";
     row.style.cssText="padding:10px 0;border-bottom:1px solid rgba(255,255,255,.1)";
@@ -1707,7 +1775,7 @@ function adminPoblar(){
     chk.id="prov-enabled-"+i;
     if(isActive) chk.checked=true;
     chk.style.width="auto";
-    chk.onchange=(function(ii){return function(){adminCambio(ii)}})(i);
+    chk.onchange=(function(ii){return function(){adminCambio(ii,"enabled",chk.checked)}})(i);
     header.appendChild(chk);
     var nameInp=document.createElement("input");
     nameInp.type="text";
@@ -1715,15 +1783,12 @@ function adminPoblar(){
     nameInp.value=p.name||"";
     nameInp.placeholder="Nombre";
     nameInp.style.cssText="flex:1;font-size:.85em;min-width:80px";
+    nameInp.oninput=(function(ii){return function(){adminCambio(ii,"name",nameInp.value)}})(i);
     header.appendChild(nameInp);
     var statusEl=document.createElement("span");
     statusEl.id="prov-status-"+i;
     statusEl.style.cssText="font-size:.75em;min-width:60px;text-align:center";
-    if(!hasKey){statusEl.textContent="\u2718 sin key";statusEl.style.color="var(--danger,#e74c3c)"}
-    else if(!isActive){statusEl.textContent="off";statusEl.style.color="var(--muted,#888)"}
-    else if(hasTest&&lastOk){statusEl.textContent="\u2713 OK";statusEl.style.color="#2ecc71"}
-    else if(hasTest&&!lastOk){statusEl.textContent="\u2718 fallo";statusEl.style.color="var(--danger,#e74c3c)"}
-    else{statusEl.textContent="sin probar";statusEl.style.color="var(--muted,#888)"}
+    adminPintarEstado(i,statusEl);
     header.appendChild(statusEl);
     row.appendChild(header);
     var fields=document.createElement("div");
@@ -1734,6 +1799,7 @@ function adminPoblar(){
     urlInp.value=p.url||"";
     urlInp.placeholder="URL API (HTTPS)";
     urlInp.style.cssText="font-size:.85em";
+    urlInp.oninput=(function(ii){return function(){adminCambio(ii,"url",urlInp.value)}})(i);
     var urlLbl=document.createElement("label");
     urlLbl.style.cssText="opacity:.6;font-size:.75em";
     urlLbl.textContent="URL";
@@ -1745,6 +1811,7 @@ function adminPoblar(){
     modelInp.value=p.model||"";
     modelInp.placeholder="Modelo";
     modelInp.style.cssText="font-size:.85em";
+    modelInp.oninput=(function(ii){return function(){adminCambio(ii,"model",modelInp.value)}})(i);
     var modelLbl=document.createElement("label");
     modelLbl.style.cssText="opacity:.6;font-size:.75em";
     modelLbl.textContent="Modelo";
@@ -1756,6 +1823,7 @@ function adminPoblar(){
     secretInp.value=p.secretRef||"";
     secretInp.placeholder="Secret (ej: GROQ_API_KEY)";
     secretInp.style.cssText="font-size:.85em";
+    secretInp.oninput=(function(ii){return function(){adminCambio(ii,"secretRef",secretInp.value)}})(i);
     var secretLbl=document.createElement("label");
     secretLbl.style.cssText="opacity:.6;font-size:.75em";
     secretLbl.textContent="Credencial";

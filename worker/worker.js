@@ -73,8 +73,10 @@ function isValidProviderUrl(url) {
 }
 
 function migrateLegacyConfig(cfg) {
-  if (Array.isArray(cfg.providers) && cfg.providers.length && cfg.providers[0] && typeof cfg.providers[0].id === "string") {
-    return cfg.providers.slice(0, MAX_PROVIDERS);
+  if (Array.isArray(cfg.providers)) {
+    // Formato nuevo. Un array vacío es una decisión explícita ("sin proveedores"):
+    // NO se rellena silenciosamente con DEFAULT_PROVIDERS.
+    return cfg.providers.filter(function (p) { return p && typeof p === "object" && typeof p.id === "string"; }).slice(0, MAX_PROVIDERS);
   }
   const order = Array.isArray(cfg.providerOrder) && cfg.providerOrder.length ? cfg.providerOrder : DEFAULT_PROVIDERS.map(function(p){ return p.id; });
   const on = cfg.providersOn || {};
@@ -219,15 +221,26 @@ function applyOverrides(messages, cfg, tipo) {
   return msgs;
 }
 
+// Devuelve { ok, providers, dropped } | { ok:false, error }
+// `dropped` documenta cada entrada descartada: nada desaparece en silencio.
 function sanitizeProvidersArray(arr) {
-  if (!Array.isArray(arr)) return null;
-  const clean = [];
+  if (!Array.isArray(arr)) return { ok: false, error: "providers debe ser un array" };
+  const providers = [];
+  const dropped = [];
   const seenIds = {};
-  for (const p of arr) {
-    if (!p || typeof p !== "object") continue;
-    if (clean.length >= MAX_PROVIDERS) break;
-    const id = typeof p.id === "string" && p.id.trim() ? p.id.trim().slice(0, 30) : "";
-    if (!id || seenIds[id]) continue;
+  arr.forEach(function (p, index) {
+    const rawId = p && typeof p === "object" && typeof p.id === "string" ? p.id.trim() : "";
+    if (providers.length >= MAX_PROVIDERS) {
+      dropped.push({ index: index, id: rawId || null, reason: "max-proveedores" });
+      return;
+    }
+    if (!p || typeof p !== "object" || Array.isArray(p)) {
+      dropped.push({ index: index, id: null, reason: "entrada-no-objeto" });
+      return;
+    }
+    const id = rawId ? rawId.slice(0, 30) : "";
+    if (!id) { dropped.push({ index: index, id: null, reason: "sin-id" }); return; }
+    if (seenIds[id]) { dropped.push({ index: index, id: id, reason: "id-duplicado" }); return; }
     seenIds[id] = true;
     const entry = { id: id };
     if (typeof p.name === "string" && p.name.trim()) entry.name = p.name.trim().slice(0, 50);
@@ -243,16 +256,39 @@ function sanitizeProvidersArray(arr) {
       if (typeof p.extra.thinking_level === "string") extra.thinking_level = p.extra.thinking_level;
       if (Object.keys(extra).length) entry.extra = extra;
     }
-    if (entry.url && entry.model && entry.secretRef) clean.push(entry);
-  }
-  return clean.length ? clean : null;
+    const missing = [];
+    if (!entry.url) missing.push("url");
+    if (!entry.model) missing.push("model");
+    if (!entry.secretRef) missing.push("secretRef");
+    if (missing.length) {
+      dropped.push({ index: index, id: id, reason: "incompleto", missing: missing });
+      return;
+    }
+    providers.push(entry);
+  });
+  return { ok: true, providers: providers, dropped: dropped };
 }
 
+// Distingue explícitamente cuatro casos para el campo `providers`:
+//   1. ausente        -> no se toca (cfg.providers queda sin definir)
+//   2. array válido   -> se persiste saneado (con warnings de lo descartado)
+//   3. array vacío [] -> se persiste como vacío explícito (NO se descarta)
+//   4. array inválido -> error; no se persiste nada
+// Devuelve { cfg, warnings } o { error, warnings }.
 function sanitizeConfig(body) {
   const cfg = {};
-  if (body.providers && Array.isArray(body.providers)) {
-    const sanitized = sanitizeProvidersArray(body.providers);
-    if (sanitized) cfg.providers = sanitized;
+  const warnings = [];
+  if (body && Object.prototype.hasOwnProperty.call(body, "providers")) {
+    if (!Array.isArray(body.providers)) {
+      return { error: "providers debe ser un array", warnings: [] };
+    }
+    const res = sanitizeProvidersArray(body.providers);
+    if (!res.ok) return { error: res.error || "providers inválido", warnings: [] };
+    if (body.providers.length > 0 && res.providers.length === 0) {
+      return { error: "Ningún proveedor válido en la lista enviada", warnings: res.dropped };
+    }
+    cfg.providers = res.providers;
+    for (const d of res.dropped) warnings.push(d);
   }
   for (const k of ["systemDiaria", "systemRel", "systemLaboral", "systemAprendizaje", "systemPers", "systemAV", "systemLarga"]) {
     if (typeof body[k] === "string") cfg[k] = body[k];
@@ -266,8 +302,19 @@ function sanitizeConfig(body) {
   if (LEN_LINES[body.lenDefault]) cfg.lenDefault = body.lenDefault;
   if (typeof body.useCorta === "boolean") cfg.useCorta = body.useCorta;
   if (typeof body.useLarga === "boolean") cfg.useLarga = body.useLarga;
-  return cfg;
+  return { cfg: cfg, warnings: warnings };
 }
+
+export {
+  MAX_PROVIDERS,
+  DEFAULT_PROVIDERS,
+  isValidProviderUrl,
+  migrateLegacyConfig,
+  buildProviders,
+  sanitizeProvidersArray,
+  sanitizeConfig,
+  providerStatus
+};
 
 export default {
   async fetch(req, env) {
@@ -296,9 +343,13 @@ export default {
         } catch (e) {
           return json({ error: "Cuerpo JSON inválido" }, 400, req);
         }
-        const cfg = sanitizeConfig(body);
+        const result = sanitizeConfig(body);
+        if (result.error) {
+          return json({ error: result.error, warnings: result.warnings || [] }, 400, req);
+        }
+        const cfg = result.cfg;
         await env.CONFIG.put(CONFIG_KEY, JSON.stringify(cfg));
-        return json({ ok: true, config: cfg }, 200, req);
+        return json({ ok: true, config: cfg, warnings: result.warnings || [] }, 200, req);
       }
       return json({ error: "Método no permitido" }, 405, req);
     }

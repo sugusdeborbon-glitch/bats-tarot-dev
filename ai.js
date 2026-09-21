@@ -441,7 +441,12 @@ function adminFetch(method,token,cfg){
     return r.text().then(function(txt){
       var data;
       try{data=JSON.parse(txt)}catch(e){throw new Error("Respuesta no v\u00e1lida del servidor")}
-      if(!r.ok) throw new Error(data.error||"Error del servidor ("+r.status+")");
+      if(!r.ok){
+        var err=new Error(data.error||"Error del servidor ("+r.status+")");
+        err.details=data.warnings||[];
+        err.status=r.status;
+        throw err;
+      }
       return data;
     });
   });
