@@ -331,8 +331,8 @@
     </div>
     <div id="admin-tab-basico">
       <div class="form-group">
-        <label>Proveedores IA</label>
-        <p class="subtle" style="text-align:left">El primero de la lista es el que se usa siempre. Si falla, la app pasa automáticamente al siguiente. El modelo mostrado es el que realmente se utiliza.</p>
+        <label>Proveedores IA (máx. 5)</label>
+        <p class="subtle" style="text-align:left">El primero es el principal. Si falla, la app pasa al siguiente. Edita nombre, URL, modelo y credencial directamente en cada tarjeta.</p>
         <div id="admin-proveedores"></div>
         <div style="margin-top:8px">
           <button class="btn btn-outline btn-sm" onclick="adminTestAll()">Probar todos</button>
@@ -353,11 +353,6 @@
       </div>
     </div>
     <div id="admin-tab-avanzado" style="display:none">
-      <div class="form-group">
-        <label>Modelos por proveedor</label>
-        <p class="subtle" style="text-align:left">Cambia el modelo utilizado por cada proveedor. El modelo debe ser compatible con la API del proveedor. Prueba el modelo antes de guardarlo.</p>
-        <div id="admin-model-fields"></div>
-      </div>
       <div class="form-group">
         <label for="admin-maxtok">Máximo de tokens de la respuesta</label>
         <input type="number" id="admin-maxtok" min="128" max="8192" step="64" value="4096">

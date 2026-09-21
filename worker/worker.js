@@ -1,11 +1,10 @@
-const GOOGLE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions";
-const GOOGLE_MODEL = "gemini-3.6-flash";
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "qwen/qwen3.6-27b";
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
-const OPENROUTER_MODEL = "openrouter/free";
-const MISTRAL_URL = "https://api.mistral.ai/v1/chat/completions";
-const MISTRAL_MODEL = "ministral-14b-latest";
+const MAX_PROVIDERS = 5;
+const DEFAULT_PROVIDERS = [
+  { id: "groq", name: "Groq", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile", secretRef: "GROQ_API_KEY" },
+  { id: "google", name: "Google", url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions", model: "gemini-3.6-flash", secretRef: "GOOGLE_API_KEY", extra: { thinking_level: "low" } },
+  { id: "openrouter", name: "OpenRouter", url: "https://openrouter.ai/api/v1/chat/completions", model: "openrouter/free", secretRef: "OPENROUTER_API_KEY" },
+  { id: "mistral", name: "Mistral", url: "https://api.mistral.ai/v1/chat/completions", model: "ministral-14b-latest", secretRef: "MISTRAL_API_KEY" }
+];
 const ALLOWED_ORIGINS = [
   "https://sugusdeborbon-glitch.github.io",
   "null"
@@ -58,13 +57,92 @@ function sistemaPorTipo(tipo) {
   return SISTEMAS[tipo] || SISTEMAS.default;
 }
 
-const PROVIDERS = [
-  { id: "groq", name: "Groq", url: GROQ_URL, model: GROQ_MODEL, keyEnv: "GROQ_API_KEY" },
-  { id: "google", name: "Google", url: GOOGLE_URL, model: GOOGLE_MODEL, keyEnv: "GOOGLE_API_KEY", googleThinking: "low" },
-  { id: "openrouter", name: "OpenRouter", url: OPENROUTER_URL, model: OPENROUTER_MODEL, keyEnv: "OPENROUTER_API_KEY" },
-  { id: "mistral", name: "Mistral", url: MISTRAL_URL, model: MISTRAL_MODEL, keyEnv: "MISTRAL_API_KEY" }
-];
-const DEFAULT_ORDER = ["groq", "google", "openrouter", "mistral"];
+function isValidProviderUrl(url) {
+  if (typeof url !== "string" || !url.trim()) return false;
+  try {
+    const u = new URL(url.trim());
+    if (u.protocol !== "https:") return false;
+    if (/javascript:/i.test(url)) return false;
+    if (/data:/i.test(url)) return false;
+    if (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "0.0.0.0") return false;
+    if (u.username || u.password) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function migrateLegacyConfig(cfg) {
+  if (Array.isArray(cfg.providers) && cfg.providers.length && cfg.providers[0] && typeof cfg.providers[0].id === "string") {
+    return cfg.providers.slice(0, MAX_PROVIDERS);
+  }
+  const order = Array.isArray(cfg.providerOrder) && cfg.providerOrder.length ? cfg.providerOrder : DEFAULT_PROVIDERS.map(function(p){ return p.id; });
+  const on = cfg.providersOn || {};
+  const provCfg = cfg.providers && typeof cfg.providers === "object" && !Array.isArray(cfg.providers) ? cfg.providers : {};
+  const migrated = [];
+  const seen = {};
+  for (const id of order) {
+    if (seen[id]) continue;
+    seen[id] = true;
+    const def = DEFAULT_PROVIDERS.find(function(d){ return d.id === id; });
+    if (!def) continue;
+    if (on[id] === false) continue;
+    const custom = provCfg[id] || {};
+    migrated.push({
+      id: id,
+      name: custom.label || def.name,
+      url: def.url,
+      model: custom.model || def.model,
+      secretRef: def.secretRef,
+      enabled: on[id] !== false,
+      extra: custom.extra || def.extra || {}
+    });
+  }
+  return migrated;
+}
+
+function buildProviders(env, cfg) {
+  const list = migrateLegacyConfig(cfg);
+  const result = [];
+  for (const p of list) {
+    if (p.enabled === false) continue;
+    if (!p.secretRef) continue;
+    const key = env[p.secretRef];
+    if (!key) continue;
+    if (!isValidProviderUrl(p.url)) continue;
+    result.push({
+      id: p.id,
+      name: p.name,
+      url: p.url,
+      model: p.model,
+      key: key,
+      extra: p.extra || {}
+    });
+  }
+  return result;
+}
+
+function availableProviders(env) {
+  return DEFAULT_PROVIDERS.map(function(p){
+    return { id: p.id, name: p.name, available: !!env[p.secretRef] };
+  });
+}
+
+function providerStatus(env, cfg) {
+  const list = migrateLegacyConfig(cfg);
+  return list.map(function(p){
+    return {
+      id: p.id,
+      name: p.name,
+      hasKey: !!env[p.secretRef],
+      active: p.enabled !== false,
+      model: p.model,
+      url: p.url,
+      secretRef: p.secretRef,
+      extra: p.extra || {}
+    };
+  });
+}
 
 const hits = new Map();
 
@@ -115,53 +193,6 @@ async function getConfig(env) {
   }
 }
 
-function buildProviders(env, cfg) {
-  const order = Array.isArray(cfg.providerOrder) && cfg.providerOrder.length ? cfg.providerOrder : DEFAULT_ORDER;
-  const on = cfg.providersOn || {};
-  const providersCfg = cfg.providers || {};
-  const list = [];
-  for (const id of order) {
-    const meta = PROVIDERS.find(function(p){ return p.id === id; });
-    if (!meta) continue;
-    if (on[id] === false) continue;
-    const key = env[meta.keyEnv];
-    if (!key) continue;
-    const custom = providersCfg[id] || {};
-    list.push({
-      name: meta.name,
-      id: meta.id,
-      url: meta.url,
-      model: custom.model || meta.model,
-      key: key,
-      googleThinking: (custom.extra && custom.extra.thinking_level) || meta.googleThinking
-    });
-  }
-  return list;
-}
-
-function availableProviders(env) {
-  return PROVIDERS.map(function(p){
-    return { id: p.id, name: p.name, available: !!env[p.keyEnv] };
-  });
-}
-
-function providerStatus(env, cfg) {
-  const providersCfg = cfg.providers || {};
-  const on = cfg.providersOn || {};
-  return PROVIDERS.map(function(p){
-    const custom = providersCfg[p.id] || {};
-    return {
-      id: p.id,
-      name: p.name,
-      hasKey: !!env[p.keyEnv],
-      active: on[p.id] !== false,
-      model: custom.model || p.model,
-      modelSource: custom.model ? "kv" : "default",
-      label: custom.label || p.name
-    };
-  });
-}
-
 const LEN_LINES = {
   corta: "Extensión: breve, alrededor de 500 caracteres (1 párrafo).",
   media: "Extensión: media, alrededor de 1500 caracteres (3-4 párrafos).",
@@ -188,46 +219,40 @@ function applyOverrides(messages, cfg, tipo) {
   return msgs;
 }
 
+function sanitizeProvidersArray(arr) {
+  if (!Array.isArray(arr)) return null;
+  const clean = [];
+  const seenIds = {};
+  for (const p of arr) {
+    if (!p || typeof p !== "object") continue;
+    if (clean.length >= MAX_PROVIDERS) break;
+    const id = typeof p.id === "string" && p.id.trim() ? p.id.trim().slice(0, 30) : "";
+    if (!id || seenIds[id]) continue;
+    seenIds[id] = true;
+    const entry = { id: id };
+    if (typeof p.name === "string" && p.name.trim()) entry.name = p.name.trim().slice(0, 50);
+    if (typeof p.url === "string" && p.url.trim()) {
+      const url = p.url.trim();
+      if (isValidProviderUrl(url)) entry.url = url;
+    }
+    if (typeof p.model === "string" && p.model.trim()) entry.model = p.model.trim().slice(0, 200);
+    if (typeof p.secretRef === "string" && p.secretRef.trim()) entry.secretRef = p.secretRef.trim().slice(0, 50);
+    if (typeof p.enabled === "boolean") entry.enabled = p.enabled;
+    if (p.extra && typeof p.extra === "object" && !Array.isArray(p.extra)) {
+      const extra = {};
+      if (typeof p.extra.thinking_level === "string") extra.thinking_level = p.extra.thinking_level;
+      if (Object.keys(extra).length) entry.extra = extra;
+    }
+    if (entry.url && entry.model && entry.secretRef) clean.push(entry);
+  }
+  return clean.length ? clean : null;
+}
+
 function sanitizeConfig(body) {
   const cfg = {};
-  if (Array.isArray(body.providerOrder)) {
-    const seen = {};
-    const order = [];
-    for (const id of body.providerOrder) {
-      if (seen[id] || !PROVIDERS.some(function(p){ return p.id === id; })) continue;
-      seen[id] = true;
-      order.push(id);
-    }
-    if (order.length) cfg.providerOrder = order;
-  }
-  if (body.providersOn && typeof body.providersOn === "object") {
-    const on = {};
-    for (const p of PROVIDERS) {
-      on[p.id] = body.providersOn[p.id] !== false;
-    }
-    cfg.providersOn = on;
-  }
-  if (body.providers && typeof body.providers === "object") {
-    const provCfg = {};
-    for (const p of PROVIDERS) {
-      const incoming = body.providers[p.id];
-      if (!incoming || typeof incoming !== "object") continue;
-      const clean = {};
-      if (typeof incoming.model === "string" && incoming.model.trim()) {
-        clean.model = incoming.model.trim().slice(0, 200);
-      }
-      if (typeof incoming.label === "string" && incoming.label.trim()) {
-        clean.label = incoming.label.trim().slice(0, 50);
-      }
-      if (incoming.extra && typeof incoming.extra === "object") {
-        clean.extra = {};
-        if (typeof incoming.extra.thinking_level === "string") {
-          clean.extra.thinking_level = incoming.extra.thinking_level;
-        }
-      }
-      if (Object.keys(clean).length) provCfg[p.id] = clean;
-    }
-    if (Object.keys(provCfg).length) cfg.providers = provCfg;
+  if (body.providers && Array.isArray(body.providers)) {
+    const sanitized = sanitizeProvidersArray(body.providers);
+    if (sanitized) cfg.providers = sanitized;
   }
   for (const k of ["systemDiaria", "systemRel", "systemLaboral", "systemAprendizaje", "systemPers", "systemAV", "systemLarga"]) {
     if (typeof body[k] === "string") cfg[k] = body[k];
@@ -262,7 +287,7 @@ export default {
           const raw = await env.CONFIG.get("provider_health");
           health = raw ? JSON.parse(raw) : {};
         } catch (e) { /* ignore */ }
-        return json({ config: cfg, available: availableProviders(env), providerInfo: providerStatus(env, cfg), providerHealth: health, defaults: DEFAULT_ORDER, systemDefaults: SISTEMAS, aiFlags: { useCorta: typeof cfg.useCorta === "boolean" ? cfg.useCorta : DEFAULT_USE_CORTA, useLarga: typeof cfg.useLarga === "boolean" ? cfg.useLarga : DEFAULT_USE_LARGA } }, 200, req);
+        return json({ config: cfg, available: availableProviders(env), providerInfo: providerStatus(env, cfg), providerHealth: health, defaults: DEFAULT_PROVIDERS.map(function(p){ return p.id; }), maxProviders: MAX_PROVIDERS, systemDefaults: SISTEMAS, aiFlags: { useCorta: typeof cfg.useCorta === "boolean" ? cfg.useCorta : DEFAULT_USE_CORTA, useLarga: typeof cfg.useLarga === "boolean" ? cfg.useLarga : DEFAULT_USE_LARGA } }, 200, req);
       }
       if (req.method === "PUT") {
         let body;
@@ -297,23 +322,20 @@ export default {
         return json({ error: "No autorizado" }, 401, req);
       }
       const cfg = await getConfig(env);
-      const providersCfg = cfg.providers || {};
-      const on = cfg.providersOn || {};
-      const status = {};
-      for (const p of PROVIDERS) {
-        const custom = providersCfg[p.id] || {};
-        status[p.id] = {
+      const list = migrateLegacyConfig(cfg);
+      const status = list.map(function(p){
+        return {
           id: p.id,
           name: p.name,
-          hasKey: !!env[p.keyEnv],
-          active: on[p.id] !== false,
-          model: custom.model || p.model,
-          modelSource: custom.model ? "kv" : "default",
-          label: custom.label || p.name,
-          url: p.url
+          hasKey: !!env[p.secretRef],
+          active: p.enabled !== false,
+          model: p.model,
+          url: p.url,
+          secretRef: p.secretRef,
+          extra: p.extra || {}
         };
-      }
-      return json({ providers: status, order: cfg.providerOrder || DEFAULT_ORDER, defaults: DEFAULT_ORDER }, 200, req);
+      });
+      return json({ providers: status, maxProviders: MAX_PROVIDERS, defaults: DEFAULT_PROVIDERS.map(function(p){ return p.id; }) }, 200, req);
     }
 
     if (url.pathname === "/api/provider-test") {
@@ -329,15 +351,28 @@ export default {
       } catch (e) {
         return json({ error: "Cuerpo JSON inválido" }, 400, req);
       }
-      const providerId = typeof body.provider === "string" ? body.provider : "";
-      if (!providerId) {
-        return json({ error: "Falta el campo provider" }, 400, req);
-      }
-      const cfg = await getConfig(env);
-      const providers = buildProviders(env, cfg);
-      const target = providers.find(function(p){ return p.id === providerId; });
-      if (!target) {
-        return json({ error: "Proveedor no disponible: " + providerId }, 400, req);
+      let target = null;
+      if (body.providerConfig && typeof body.providerConfig === "object") {
+        const pc = body.providerConfig;
+        if (!pc.url || !isValidProviderUrl(pc.url)) {
+          return json({ error: "URL inválida" }, 400, req);
+        }
+        const key = pc.secretRef ? env[pc.secretRef] : null;
+        if (!key) {
+          return json({ error: "Credencial no configurada: " + (pc.secretRef || "ninguna") }, 400, req);
+        }
+        target = { id: pc.id || "custom", name: pc.name || "Custom", url: pc.url, model: pc.model, key: key, extra: pc.extra || {} };
+      } else {
+        const providerId = typeof body.provider === "string" ? body.provider : "";
+        if (!providerId) {
+          return json({ error: "Falta el campo provider o providerConfig" }, 400, req);
+        }
+        const cfg = await getConfig(env);
+        const providers = buildProviders(env, cfg);
+        target = providers.find(function(p){ return p.id === providerId; });
+        if (!target) {
+          return json({ error: "Proveedor no disponible: " + providerId }, 400, req);
+        }
       }
       const testMessages = [{ role: "user", content: "PING" }];
       const t0 = Date.now();
@@ -356,12 +391,14 @@ export default {
         healthEntry.error = res.err;
         healthEntry.category = res.category || "unknown";
       }
-      try {
-        const raw = await env.CONFIG.get("provider_health");
-        const health = raw ? JSON.parse(raw) : {};
-        health[providerId] = healthEntry;
-        await env.CONFIG.put("provider_health", JSON.stringify(health));
-      } catch (e) { /* health storage best-effort */ }
+      if (target.id) {
+        try {
+          const raw = await env.CONFIG.get("provider_health");
+          const health = raw ? JSON.parse(raw) : {};
+          health[target.id] = healthEntry;
+          await env.CONFIG.put("provider_health", JSON.stringify(health));
+        } catch (e) { /* health storage best-effort */ }
+      }
       return json(healthEntry, 200, req);
     }
 
@@ -550,11 +587,11 @@ async function llamarProveedor(provider, messages, payload) {
     temperature: payload.temperature,
     max_tokens: payload.max_tokens
   };
-  if (provider.googleThinking) {
+  if (provider.extra && provider.extra.thinking_level) {
     bodyObj.extra_body = {
       google: {
         thinking_config: {
-          thinking_level: provider.googleThinking,
+          thinking_level: provider.extra.thinking_level,
           include_thoughts: false
         }
       }

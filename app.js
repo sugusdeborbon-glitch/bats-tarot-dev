@@ -1428,7 +1428,7 @@ function initSW(){
 }
 
 var ADMIN_URL_KEY="b3a2b557191caaaf8e5c246b";
-var _adminState={config:null,defaults:null,available:null,providerInfo:null,providerHealth:null,systemDefaults:null,pendingOrder:null,pendingOn:null,aiFlags:null,pendingModels:null};
+var _adminState={config:null,defaults:null,available:null,providerInfo:null,providerHealth:null,systemDefaults:null,pendingProviders:null,maxProviders:null,aiFlags:null};
 var ADMIN_SISTEMAS_CFGKEY={
   diaria:"systemDiaria",
   rel:"systemRel",
@@ -1464,9 +1464,8 @@ function adminEntrar(token){
     _adminState.providerHealth=data.providerHealth||{};
     _adminState.systemDefaults=data.systemDefaults||{};
     _adminState.aiFlags=data.aiFlags||{useCorta:true,useLarga:true};
-    _adminState.pendingOrder=null;
-    _adminState.pendingOn=null;
-    _adminState.pendingModels=null;
+    _adminState.maxProviders=data.maxProviders||5;
+    _adminState.pendingProviders=null;
     document.getElementById("admin-box").style.display="none";
     document.getElementById("admin-pass").value="";
     document.getElementById("admin-panel").style.display="block";
@@ -1480,9 +1479,7 @@ function adminEntrar(token){
 function adminCerrar(){
   adminClearToken();
   _adminState.config=null;
-  _adminState.pendingOrder=null;
-  _adminState.pendingOn=null;
-  _adminState.pendingModels=null;
+  _adminState.pendingProviders=null;
   document.getElementById("admin-panel").style.display="none";
   document.getElementById("admin-box").style.display="block";
   adminMsg("");
@@ -1511,146 +1508,52 @@ function adminNombres(){
   (_adminState.available||[]).forEach(function(p){names[p.id]=p.nombre||p.name||p.id});
   return names;
 }
-function adminLeerActivos(){
-  var on={};
-  (_adminState.available||[]).forEach(function(p){
-    var el=document.getElementById("admin-on-"+p.id);
-    if(el) on[p.id]=el.checked;
-  });
-  return on;
-}
-function adminOrdenActual(){
-  var o=_adminState.pendingOrder||(Array.isArray(_adminState.config&&_adminState.config.providerOrder)&&_adminState.config.providerOrder.length?_adminState.config.providerOrder:null)||_adminState.defaults;
-  return o.slice();
-}
-function adminPoblar(){
-  var cfg=_adminState.config||{};
-  var order=adminOrdenActual();
-  var on=_adminState.pendingOn||cfg.providersOn||{};
-  var pinfo=_adminState.providerInfo||[];
-  var health=_adminState.providerHealth||{};
-  var provCfg=(_adminState.pendingModels)||(cfg.providers||{});
-  var infoMap={};
-  pinfo.forEach(function(p){infoMap[p.id]=p});
-  var cont=document.getElementById("admin-proveedores");
-  if(!cont) return;
-  cont.innerHTML="";
-  order.forEach(function(id,i){
-    var info=infoMap[id]||{};
-    var h=health[id]||{};
-    var custom=provCfg[id]||{};
-    var modelName=custom.model||info.model||id;
-    var label=custom.label||info.name||id;
-    var hasKey=info.hasKey||false;
-    var isActive=on[id]!==false;
-    var lastOk=h.ok===true;
-    var hasTest=!!h.lastTest;
-    var row=document.createElement("div");
-    row.className="admin-prov";
-    row.style.cssText="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.08);flex-wrap:wrap";
-    var num=document.createElement("span");
-    num.style.cssText="opacity:.5;width:16px";
-    num.textContent=i+1;
-    row.appendChild(num);
-    var chk=document.createElement("input");
-    chk.type="checkbox";
-    chk.id="admin-on-"+id;
-    if(isActive) chk.checked=true;
-    chk.style.width="auto";
-    chk.onchange=adminCambio;
-    row.appendChild(chk);
-    var infoCol=document.createElement("span");
-    infoCol.style.cssText="flex:1;text-align:left;min-width:120px";
-    var modelEl=document.createElement("strong");
-    modelEl.style.cssText="display:block;font-size:.9em;color:var(--gold,#c9a45c)";
-    modelEl.textContent=modelName;
-    infoCol.appendChild(modelEl);
-    var detailEl=document.createElement("span");
-    detailEl.style.cssText="font-size:.75em;opacity:.7";
-    detailEl.textContent="Proveedor: "+label+(hasKey?"":" \u2014 sin key");
-    infoCol.appendChild(detailEl);
-    row.appendChild(infoCol);
-    var statusEl=document.createElement("span");
-    statusEl.style.cssText="font-size:.75em;min-width:60px;text-align:center";
-    if(!hasKey){statusEl.textContent="\u2718 sin key";statusEl.style.color="var(--danger,#e74c3c)"}
-    else if(!isActive){statusEl.textContent="off";statusEl.style.color="var(--muted,#888)"}
-    else if(hasTest&&lastOk){statusEl.textContent="\u2713 OK";statusEl.style.color="#2ecc71"}
-    else if(hasTest&&!lastOk){statusEl.textContent="\u2718 fallo";statusEl.style.color="var(--danger,#e74c3c)"}
-    else{statusEl.textContent="sin probar";statusEl.style.color="var(--muted,#888)"}
-    row.appendChild(statusEl);
-    var testBtn=document.createElement("button");
-    testBtn.className="btn btn-outline btn-sm";
-    testBtn.textContent="Probar";
-    testBtn.disabled=!hasKey||!isActive;
-    testBtn.onclick=(function(pid){return function(){adminTestProvider(pid)}})(id);
-    row.appendChild(testBtn);
-    var upBtn=document.createElement("button");
-    upBtn.className="btn btn-outline btn-sm";
-    upBtn.textContent="\u25B2";
-    if(i===0)upBtn.disabled=true;
-    upBtn.onclick=(function(ii){return function(){adminMover(ii,-1)}})(i);
-    row.appendChild(upBtn);
-    var dnBtn=document.createElement("button");
-    dnBtn.className="btn btn-outline btn-sm";
-    dnBtn.textContent="\u25BC";
-    if(i===order.length-1)dnBtn.disabled=true;
-    dnBtn.onclick=(function(ii){return function(){adminMover(ii,1)}})(i);
-    row.appendChild(dnBtn);
-    cont.appendChild(row);
-  });
-  document.getElementById("admin-temp").value=cfg.temperature!=null?cfg.temperature:0.7;
-  adminTempVal();
-  document.getElementById("admin-len").value=cfg.lenDefault||"media";
-  document.getElementById("admin-maxtok").value=cfg.maxTokens||4096;
-  var af=_adminState.aiFlags||{useCorta:true,useLarga:true};
-  var elUC=document.getElementById("admin-use-corta"),elUL=document.getElementById("admin-use-larga");
-  if(elUC) elUC.checked=af.useCorta!==false;
-  if(elUL) elUL.checked=af.useLarga!==false;
-  for(var g in ADMIN_SISTEMAS_CFGKEY){
-    var elS=document.getElementById("admin-sys-"+g);
-    if(!elS) continue;
-    elS.value=cfg[ADMIN_SISTEMAS_CFGKEY[g]]!=null?cfg[ADMIN_SISTEMAS_CFGKEY[g]]:((_adminState.systemDefaults||{})[g]||"");
-  }
-  var modelCont=document.getElementById("admin-model-fields");
-  if(modelCont){
-    modelCont.innerHTML="";
-    order.forEach(function(id){
-      var info=infoMap[id]||{};
-      var custom=provCfg[id]||{};
-      var currentModel=custom.model||info.model||"";
-      var label=custom.label||info.name||id;
-      var row=document.createElement("div");
-      row.style.cssText="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,.08)";
-      var lbl=document.createElement("label");
-      lbl.style.cssText="min-width:90px;font-size:.85em;font-weight:normal";
-      lbl.textContent=label;
-      row.appendChild(lbl);
-      var inp=document.createElement("input");
-      inp.type="text";
-      inp.id="admin-model-"+id;
-      inp.value=currentModel;
-      inp.style.cssText="flex:1;font-size:.85em";
-      inp.placeholder="modelo";
-      row.appendChild(inp);
-      modelCont.appendChild(row);
-    });
-  }
-}
 function adminCambio(){
-  _adminState.pendingOn=adminLeerActivos();
-}
-function adminMover(i,dir){
-  var order=adminOrdenActual();
-  var j=i+dir;
-  if(j<0||j>=order.length) return;
-  var t=order[i];order[i]=order[j];order[j]=t;
-  _adminState.pendingOrder=order;
   adminPoblar();
 }
+function adminMover(i,dir){
+  var providers=(_adminState.pendingProviders||[]).slice();
+  var j=i+dir;
+  if(j<0||j>=providers.length) return;
+  var t=providers[i];providers[i]=providers[j];providers[j]=t;
+  _adminState.pendingProviders=providers;
+  adminPoblar();
+}
+function adminQuitar(i){
+  var providers=(_adminState.pendingProviders||[]).slice();
+  if(providers.length<=1){adminMsg("Debe haber al menos un proveedor",true);return}
+  providers.splice(i,1);
+  _adminState.pendingProviders=providers;
+  adminPoblar();
+}
+function adminAnadir(){
+  var providers=(_adminState.pendingProviders||[]).slice();
+  if(providers.length>=5){adminMsg("M\u00e1ximo 5 proveedores",true);return}
+  var n=providers.length+1;
+  providers.push({id:"custom_"+Date.now(),name:"Proveedor "+n,url:"https://",model:"",secretRef:"",enabled:false,extra:{}});
+  _adminState.pendingProviders=providers;
+  adminPoblar();
+}
+function adminLeerProviders(){
+  var providers=(_adminState.pendingProviders||[]).slice();
+  providers.forEach(function(p,i){
+    var elName=document.getElementById("prov-name-"+i);
+    var elUrl=document.getElementById("prov-url-"+i);
+    var elModel=document.getElementById("prov-model-"+i);
+    var elSecret=document.getElementById("prov-secret-"+i);
+    var elEnabled=document.getElementById("prov-enabled-"+i);
+    if(elName) p.name=elName.value.trim();
+    if(elUrl) p.url=elUrl.value.trim();
+    if(elModel) p.model=elModel.value.trim();
+    if(elSecret) p.secretRef=elSecret.value.trim();
+    if(elEnabled) p.enabled=elEnabled.checked;
+  });
+  return providers;
+}
 function adminGuardar(){
+  var providers=adminLeerProviders();
   var cfg={};
-  cfg.providerOrder=adminOrdenActual();
-  cfg.providersOn=adminLeerActivos();
+  cfg.providers=providers;
   cfg.temperature=parseFloat(document.getElementById("admin-temp").value);
   cfg.maxTokens=parseInt(document.getElementById("admin-maxtok").value,10)||4096;
   cfg.lenDefault=document.getElementById("admin-len").value;
@@ -1667,13 +1570,12 @@ function adminGuardar(){
   adminMsg("Guardando\u2026");
   adminSaveConfig(tok,cfg).then(function(data){
     _adminState.config=data.config||cfg;
-    _adminState.pendingOrder=null;
-    _adminState.pendingOn=null;
+    _adminState.pendingProviders=null;
     if(data.config){
       _adminState.aiFlags={useCorta:data.config.useCorta!==false,useLarga:data.config.useLarga!==false};
     }
     if(typeof setAIFlagsLocal==="function") setAIFlagsLocal(_adminState.aiFlags);
-    adminPoblar();
+    adminRefresh();
     adminMsg("\u2713 Cambios guardados. Ya est\u00e1n aplicados para todas las tiradas.");
   },function(e){
     adminMsg((e&&e.message)||"No se pudieron guardar los cambios.",true);
@@ -1688,27 +1590,42 @@ function adminRestaurarTodo(){
   var tok=adminGetToken();
   adminSaveConfig(tok,{}).then(function(){
     _adminState.config={};
-    _adminState.pendingOrder=null;
-    _adminState.pendingOn=null;
-    _adminState.pendingModels=null;
+    _adminState.pendingProviders=null;
     _adminState.aiFlags={useCorta:true,useLarga:true};
     if(typeof setAIFlagsLocal==="function") setAIFlagsLocal({useCorta:true,useLarga:true});
-    adminPoblar();
+    adminRefresh();
     adminMsg("\u2713 Valores originales restaurados.");
   },function(e){
     adminMsg((e&&e.message)||"No se pudieron restaurar los valores.",true);
   });
 }
 
-/* ============ PROVIDER MANAGEMENT ============ */
+/* ============ PROVIDER MANAGEMENT v2 ============ */
 
-function adminTestProvider(providerId){
+function adminRefresh(){
+  var tok=adminGetToken();
+  if(!tok) return;
+  adminGetConfig(tok).then(function(data){
+    _adminState.config=data.config||{};
+    _adminState.defaults=data.defaults||["groq","google","openrouter","mistral"];
+    _adminState.available=data.available||[];
+    _adminState.providerInfo=data.providerInfo||[];
+    _adminState.providerHealth=data.providerHealth||{};
+    _adminState.maxProviders=data.maxProviders||5;
+    _adminState.pendingProviders=null;
+    adminPoblar();
+  },function(){});
+}
+function adminTestProvider(idx){
   var tok=adminGetToken();
   if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
-  adminMsg("Probando "+providerId+"\u2026");
-  adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{provider:providerId}}).then(function(data){
+  var providers=_adminState.pendingProviders||(_adminState.providerInfo||[]);
+  var p=providers[idx];
+  if(!p){adminMsg("Proveedor no encontrado",true);return}
+  adminMsg("Probando "+(p.name||p.id)+"\u2026");
+  adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{providerConfig:{id:p.id,name:p.name,url:p.url,model:p.model,secretRef:p.secretRef,extra:p.extra||{}}}}).then(function(data){
     var ok=data.ok;
-    var msg=(ok?"\u2713":"\u2718")+" "+providerId+": ";
+    var msg=(ok?"\u2713":"\u2718")+" "+(p.name||p.id)+": ";
     if(ok){
       msg+=data.status+" OK \u2014 "+data.latency+"ms";
       if(data.modelReal) msg+=" \u2014 modelo: "+data.modelReal;
@@ -1717,30 +1634,29 @@ function adminTestProvider(providerId){
     }
     adminMsg(msg,!ok);
     if(!_adminState.providerHealth) _adminState.providerHealth={};
-    _adminState.providerHealth[providerId]=data;
+    _adminState.providerHealth[p.id]=data;
     adminPoblar();
   },function(e){
-    adminMsg("Error al probar "+providerId+": "+(e&&e.message||"desconocido"),true);
+    adminMsg("Error al probar "+(p.name||p.id)+": "+(e&&e.message||"desconocido"),true);
   });
 }
 function adminTestAll(){
   if(!confirm("\u00bfProbar todos los proveedores activos? Esto realizar\u00e1 llamadas a la IA y puede consumir cuota.")) return;
   var tok=adminGetToken();
   if(!tok){adminMsg("Sesi\u00f3n no v\u00e1lida",true);return}
-  var order=adminOrdenActual();
-  var on=_adminState.pendingOn||(_adminState.config||{}).providersOn||{};
-  var active=order.filter(function(id){return on[id]!==false});
+  var providers=_adminState.pendingProviders||(_adminState.providerInfo||[]);
+  var active=providers.filter(function(p){return p.enabled!==false});
   if(!active.length){adminMsg("No hay proveedores activos para probar",true);return}
   adminMsg("Probando 0/"+active.length+"\u2026");
   var idx=0;
   function testNext(){
     if(idx>=active.length){adminMsg("\u2713 Prueba completada");adminPoblar();return}
-    var pid=active[idx];
+    var p=active[idx];
     idx++;
-    adminMsg("Probando "+pid+" ("+idx+"/"+active.length+")\u2026");
-    adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{provider:pid}}).then(function(data){
+    adminMsg("Probando "+(p.name||p.id)+" ("+idx+"/"+active.length+")\u2026");
+    adminFetch("POST",tok,{endpoint:"/api/provider-test",body:{providerConfig:{id:p.id,name:p.name,url:p.url,model:p.model,secretRef:p.secretRef,extra:p.extra||{}}}}).then(function(data){
       if(!_adminState.providerHealth) _adminState.providerHealth={};
-      _adminState.providerHealth[pid]=data;
+      _adminState.providerHealth[p.id]=data;
       testNext();
     },function(){
       testNext();
@@ -1748,49 +1664,150 @@ function adminTestAll(){
   }
   testNext();
 }
-function adminLeerModels(){
-  var models={};
-  var order=adminOrdenActual();
-  order.forEach(function(id){
-    var el=document.getElementById("admin-model-"+id);
-    if(el&&el.value.trim()) models[id]={model:el.value.trim()};
+function adminPoblar(){
+  var cfg=_adminState.config||{};
+  var providers=_adminState.pendingProviders||(_adminState.providerInfo||[]);
+  var health=_adminState.providerHealth||{};
+  var maxP=_adminState.maxProviders||5;
+  var cont=document.getElementById("admin-proveedores");
+  if(!cont) return;
+  cont.innerHTML="";
+  providers.forEach(function(p,i){
+    var h=health[p.id]||{};
+    var hasKey=p.hasKey||false;
+    var isActive=p.enabled!==false;
+    var lastOk=h.ok===true;
+    var hasTest=!!h.lastTest;
+    var row=document.createElement("div");
+    row.className="admin-prov";
+    row.style.cssText="padding:10px 0;border-bottom:1px solid rgba(255,255,255,.1)";
+    var header=document.createElement("div");
+    header.style.cssText="display:flex;align-items:center;gap:6px;margin-bottom:6px";
+    var num=document.createElement("span");
+    num.style.cssText="opacity:.5;width:18px;font-size:.85em";
+    num.textContent=(i+1)+".";
+    header.appendChild(num);
+    var chk=document.createElement("input");
+    chk.type="checkbox";
+    chk.id="prov-enabled-"+i;
+    if(isActive) chk.checked=true;
+    chk.style.width="auto";
+    chk.onchange=adminCambio;
+    header.appendChild(chk);
+    var nameInp=document.createElement("input");
+    nameInp.type="text";
+    nameInp.id="prov-name-"+i;
+    nameInp.value=p.name||"";
+    nameInp.placeholder="Nombre";
+    nameInp.style.cssText="flex:1;font-size:.85em;min-width:80px";
+    nameInp.onchange=adminCambio;
+    header.appendChild(nameInp);
+    var statusEl=document.createElement("span");
+    statusEl.style.cssText="font-size:.75em;min-width:60px;text-align:center";
+    if(!hasKey){statusEl.textContent="\u2718 sin key";statusEl.style.color="var(--danger,#e74c3c)"}
+    else if(!isActive){statusEl.textContent="off";statusEl.style.color="var(--muted,#888)"}
+    else if(hasTest&&lastOk){statusEl.textContent="\u2713 OK";statusEl.style.color="#2ecc71"}
+    else if(hasTest&&!lastOk){statusEl.textContent="\u2718 fallo";statusEl.style.color="var(--danger,#e74c3c)"}
+    else{statusEl.textContent="sin probar";statusEl.style.color="var(--muted,#888)"}
+    header.appendChild(statusEl);
+    row.appendChild(header);
+    var fields=document.createElement("div");
+    fields.style.cssText="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;font-size:.8em";
+    var urlInp=document.createElement("input");
+    urlInp.type="text";
+    urlInp.id="prov-url-"+i;
+    urlInp.value=p.url||"";
+    urlInp.placeholder="URL API (HTTPS)";
+    urlInp.style.cssText="font-size:.85em";
+    urlInp.onchange=adminCambio;
+    var urlLbl=document.createElement("label");
+    urlLbl.style.cssText="opacity:.6;font-size:.75em";
+    urlLbl.textContent="URL";
+    fields.appendChild(urlLbl);
+    fields.appendChild(urlInp);
+    var modelInp=document.createElement("input");
+    modelInp.type="text";
+    modelInp.id="prov-model-"+i;
+    modelInp.value=p.model||"";
+    modelInp.placeholder="Modelo";
+    modelInp.style.cssText="font-size:.85em";
+    modelInp.onchange=adminCambio;
+    var modelLbl=document.createElement("label");
+    modelLbl.style.cssText="opacity:.6;font-size:.75em";
+    modelLbl.textContent="Modelo";
+    fields.appendChild(modelLbl);
+    fields.appendChild(modelInp);
+    var secretInp=document.createElement("input");
+    secretInp.type="text";
+    secretInp.id="prov-secret-"+i;
+    secretInp.value=p.secretRef||"";
+    secretInp.placeholder="Secret (ej: GROQ_API_KEY)";
+    secretInp.style.cssText="font-size:.85em";
+    secretInp.onchange=adminCambio;
+    var secretLbl=document.createElement("label");
+    secretLbl.style.cssText="opacity:.6;font-size:.75em";
+    secretLbl.textContent="Credencial";
+    fields.appendChild(secretLbl);
+    fields.appendChild(secretInp);
+    row.appendChild(fields);
+    var btns=document.createElement("div");
+    btns.style.cssText="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap";
+    var testBtn=document.createElement("button");
+    testBtn.className="btn btn-outline btn-sm";
+    testBtn.textContent="Probar";
+    testBtn.onclick=(function(ii){return function(){adminTestProvider(ii)}})(i);
+    btns.appendChild(testBtn);
+    var upBtn=document.createElement("button");
+    upBtn.className="btn btn-outline btn-sm";
+    upBtn.textContent="\u25B2";
+    upBtn.disabled=i===0;
+    upBtn.onclick=(function(ii){return function(){adminMover(ii,-1)}})(i);
+    btns.appendChild(upBtn);
+    var dnBtn=document.createElement("button");
+    dnBtn.className="btn btn-outline btn-sm";
+    dnBtn.textContent="\u25BC";
+    dnBtn.disabled=i===providers.length-1;
+    dnBtn.onclick=(function(ii){return function(){adminMover(ii,1)}})(i);
+    btns.appendChild(dnBtn);
+    if(providers.length>1){
+      var rmBtn=document.createElement("button");
+      rmBtn.className="btn btn-outline btn-sm";
+      rmBtn.textContent="Quitar";
+      rmBtn.style.color="var(--danger,#e74c3c)";
+      rmBtn.onclick=(function(ii){return function(){adminQuitar(ii)}})(i);
+      btns.appendChild(rmBtn);
+    }
+    row.appendChild(btns);
+    cont.appendChild(row);
   });
-  return models;
-}
-function adminGuardar(){
-  var cfg={};
-  cfg.providerOrder=adminOrdenActual();
-  cfg.providersOn=adminLeerActivos();
-  cfg.temperature=parseFloat(document.getElementById("admin-temp").value);
-  cfg.maxTokens=parseInt(document.getElementById("admin-maxtok").value,10)||4096;
-  cfg.lenDefault=document.getElementById("admin-len").value;
+  var addCont=document.createElement("div");
+  addCont.style.cssText="padding:8px 0;text-align:center";
+  if(providers.length<maxP){
+    var addBtn=document.createElement("button");
+    addBtn.className="btn btn-outline btn-sm";
+    addBtn.textContent="+ A\u00f1adir API ("+providers.length+"/"+maxP+")";
+    addBtn.onclick=adminAnadir;
+    addCont.appendChild(addBtn);
+  }else{
+    var fullEl=document.createElement("span");
+    fullEl.style.cssText="opacity:.5;font-size:.85em";
+    fullEl.textContent=providers.length+"/"+maxP+" (m\u00e1ximo alcanzado)";
+    addCont.appendChild(fullEl);
+  }
+  cont.appendChild(addCont);
+  document.getElementById("admin-temp").value=cfg.temperature!=null?cfg.temperature:0.7;
+  adminTempVal();
+  document.getElementById("admin-len").value=cfg.lenDefault||"media";
+  document.getElementById("admin-maxtok").value=cfg.maxTokens||4096;
+  var af=_adminState.aiFlags||{useCorta:true,useLarga:true};
   var elUC=document.getElementById("admin-use-corta"),elUL=document.getElementById("admin-use-larga");
-  cfg.useCorta=elUC?elUC.checked:true;
-  cfg.useLarga=elUL?elUL.checked:true;
-  var models=adminLeerModels();
-  if(Object.keys(models).length) cfg.providers=models;
+  if(elUC) elUC.checked=af.useCorta!==false;
+  if(elUL) elUL.checked=af.useLarga!==false;
   for(var g in ADMIN_SISTEMAS_CFGKEY){
     var elS=document.getElementById("admin-sys-"+g);
     if(!elS) continue;
-    var val=elS.value;
-    if(val!==(_adminState.systemDefaults||{})[g]) cfg[ADMIN_SISTEMAS_CFGKEY[g]]=val;
+    elS.value=cfg[ADMIN_SISTEMAS_CFGKEY[g]]!=null?cfg[ADMIN_SISTEMAS_CFGKEY[g]]:((_adminState.systemDefaults||{})[g]||"");
   }
-  var tok=adminGetToken();
-  adminMsg("Guardando\u2026");
-  adminSaveConfig(tok,cfg).then(function(data){
-    _adminState.config=data.config||cfg;
-    _adminState.pendingOrder=null;
-    _adminState.pendingOn=null;
-    _adminState.pendingModels=null;
-    if(data.config){
-      _adminState.aiFlags={useCorta:data.config.useCorta!==false,useLarga:data.config.useLarga!==false};
-    }
-    if(typeof setAIFlagsLocal==="function") setAIFlagsLocal(_adminState.aiFlags);
-    adminPoblar();
-    adminMsg("\u2713 Cambios guardados. Ya est\u00e1n aplicados para todas las tiradas.");
-  },function(e){
-    adminMsg((e&&e.message)||"No se pudieron guardar los cambios.",true);
-  });
 }
 
 /* ============ LECTURA POR VOZ (Web Speech API) ============ */
