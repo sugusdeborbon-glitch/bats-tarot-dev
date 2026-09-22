@@ -332,7 +332,7 @@
     <div id="admin-tab-basico">
       <div class="form-group">
         <label>Proveedores IA (máx. 5)</label>
-        <p class="subtle" style="text-align:left">El primero es el principal. Si falla, la app pasa al siguiente. Edita nombre, URL, modelo y credencial directamente en cada tarjeta.</p>
+        <p class="subtle" style="text-align:left">El primero es el principal. Si falla, la app pasa al siguiente. En «Nombre del Cloudflare Secret» escribe solo el NOMBRE del secreto (ej: GROQ_API_KEY); el valor de la clave nunca se muestra ni se guarda. Los proveedores por defecto no necesitan nombre: el servidor usa el suyo.</p>
         <div id="admin-proveedores"></div>
         <div style="margin-top:8px">
           <button class="btn btn-outline btn-sm" onclick="adminTestAll()">Probar todos</button>

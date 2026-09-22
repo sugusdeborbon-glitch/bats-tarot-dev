@@ -14,6 +14,9 @@ const RATE_LIMIT_WINDOW_MS = 60000;
 const MAX_TOKENS = 8192;
 const ADMIN_ENDPOINT = "/api/config";
 const CONFIG_KEY = "ai_config";
+// Contrato de credenciales: secretRef es el NOMBRE del Cloudflare Secret, nunca el valor.
+// Sólo se aceptan identificadores en MAYÚSCULAS del estilo "GROQ_API_KEY".
+const SECRET_REF_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/;
 const TTS_ENDPOINT = "/api/tts";
 const TTS_MAX_TEXT = 20000;
 const TTS_GOOGLE = "https://translate.google.com/translate_tts";
@@ -130,6 +133,41 @@ function availableProviders(env) {
   });
 }
 
+function patronSecretRefOK(v) {
+  return typeof v === "string" && SECRET_REF_PATTERN.test(v);
+}
+
+// Resuelve el nombre de Cloudflare Secret a usar para un proveedor.
+// - Una cadena NO vacía sólo se acepta si es un identificador válido; si parece
+//   un valor de credencial (gsk_, sk-, Bearer...) devuelve null.
+// - Una cadena vacía/ausente: los proveedores por defecto usan su secretRef de
+//   fábrica; los ids desconocidos no tienen nombre que resolver.
+function resolveSecretRef(id, secretRef) {
+  if (typeof secretRef === "string" && secretRef.trim()) {
+    const v = secretRef.trim();
+    if (patronSecretRefOK(v)) return v;
+    return null;
+  }
+  const def = DEFAULT_PROVIDERS.find(function (d) { return d.id === id; });
+  return def ? def.secretRef : null;
+}
+
+// Clona una config quitando secretRef de cada proveedor antes de enviarla al
+// cliente. El valor NO es legible desde el frontend por ninguna ruta.
+function redactConfig(cfg) {
+  if (!cfg || typeof cfg !== "object") return cfg;
+  if (Array.isArray(cfg.providers)) {
+    const out = Object.assign({}, cfg);
+    out.providers = cfg.providers.map(function (p) {
+      const c = Object.assign({}, p);
+      delete c.secretRef;
+      return c;
+    });
+    return out;
+  }
+  return cfg;
+}
+
 function providerStatus(env, cfg) {
   const list = migrateLegacyConfig(cfg);
   return list.map(function(p){
@@ -140,7 +178,6 @@ function providerStatus(env, cfg) {
       active: p.enabled !== false,
       model: p.model,
       url: p.url,
-      secretRef: p.secretRef,
       extra: p.extra || {}
     };
   });
@@ -249,7 +286,17 @@ function sanitizeProvidersArray(arr) {
       if (isValidProviderUrl(url)) entry.url = url;
     }
     if (typeof p.model === "string" && p.model.trim()) entry.model = p.model.trim().slice(0, 200);
-    if (typeof p.secretRef === "string" && p.secretRef.trim()) entry.secretRef = p.secretRef.trim().slice(0, 50);
+    const srefRaw = typeof p.secretRef === "string" ? p.secretRef.trim() : "";
+    if (srefRaw) {
+      if (!patronSecretRefOK(srefRaw)) {
+        dropped.push({ index: index, id: id, reason: "secretref-no-identificador" });
+        return;
+      }
+      entry.secretRef = srefRaw;
+    } else if (DEFAULT_PROVIDERS.some(function (d) { return d.id === id; })) {
+      // Proveedor por defecto sin nombre de secreto: se usa el de fábrica.
+      entry.secretRef = DEFAULT_PROVIDERS.find(function (d) { return d.id === id; }).secretRef;
+    }
     if (typeof p.enabled === "boolean") entry.enabled = p.enabled;
     if (p.extra && typeof p.extra === "object" && !Array.isArray(p.extra)) {
       const extra = {};
@@ -313,7 +360,9 @@ export {
   buildProviders,
   sanitizeProvidersArray,
   sanitizeConfig,
-  providerStatus
+  providerStatus,
+  resolveSecretRef,
+  redactConfig
 };
 
 export default {
@@ -334,7 +383,7 @@ export default {
           const raw = await env.CONFIG.get("provider_health");
           health = raw ? JSON.parse(raw) : {};
         } catch (e) { /* ignore */ }
-        return json({ config: cfg, available: availableProviders(env), providerInfo: providerStatus(env, cfg), providerHealth: health, defaults: DEFAULT_PROVIDERS.map(function(p){ return p.id; }), maxProviders: MAX_PROVIDERS, systemDefaults: SISTEMAS, aiFlags: { useCorta: typeof cfg.useCorta === "boolean" ? cfg.useCorta : DEFAULT_USE_CORTA, useLarga: typeof cfg.useLarga === "boolean" ? cfg.useLarga : DEFAULT_USE_LARGA } }, 200, req);
+        return json({ config: redactConfig(cfg), available: availableProviders(env), providerInfo: providerStatus(env, cfg), providerHealth: health, defaults: DEFAULT_PROVIDERS.map(function(p){ return p.id; }), maxProviders: MAX_PROVIDERS, systemDefaults: SISTEMAS, aiFlags: { useCorta: typeof cfg.useCorta === "boolean" ? cfg.useCorta : DEFAULT_USE_CORTA, useLarga: typeof cfg.useLarga === "boolean" ? cfg.useLarga : DEFAULT_USE_LARGA } }, 200, req);
       }
       if (req.method === "PUT") {
         let body;
@@ -382,7 +431,6 @@ export default {
           active: p.enabled !== false,
           model: p.model,
           url: p.url,
-          secretRef: p.secretRef,
           extra: p.extra || {}
         };
       });
@@ -408,9 +456,11 @@ export default {
         if (!pc.url || !isValidProviderUrl(pc.url)) {
           return json({ error: "URL inválida" }, 400, req);
         }
-        const key = pc.secretRef ? env[pc.secretRef] : null;
+        const ref = resolveSecretRef(pc.id, pc.secretRef);
+        const key = ref ? env[ref] : null;
         if (!key) {
-          return json({ error: "Credencial no configurada: " + (pc.secretRef || "ninguna") }, 400, req);
+          // Error redactado: nunca se repite el valor ni el nombre recibido.
+          return json({ error: "Credencial no configurada para " + (pc.id || pc.name || "el proveedor") }, 400, req);
         }
         target = { id: pc.id || "custom", name: pc.name || "Custom", url: pc.url, model: pc.model, key: key, extra: pc.extra || {} };
       } else {

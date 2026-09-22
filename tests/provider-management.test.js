@@ -12,7 +12,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
-import {
+import worker, {
   MAX_PROVIDERS,
   DEFAULT_PROVIDERS,
   isValidProviderUrl,
@@ -20,7 +20,9 @@ import {
   buildProviders,
   sanitizeProvidersArray,
   sanitizeConfig,
-  providerStatus
+  providerStatus,
+  resolveSecretRef,
+  redactConfig
 } from "../worker/worker.js";
 
 const DEFAULT_IDS = DEFAULT_PROVIDERS.map(function (p) { return p.id; });
@@ -176,10 +178,10 @@ describe("sanitizeProvidersArray (worker real)", function () {
 
   it("reports incomplete entries instead of dropping them silently", function () {
     const res = sanitizeProvidersArray([
-      { id: "ok", url: "https://a.com/v1", model: "m", secretRef: "K" },
-      { id: "sin-modelo", url: "https://b.com/v1", secretRef: "K" },
-      { id: "sin-url", model: "m", secretRef: "K" },
-      { id: "url-http", url: "http://b.com/v1", model: "m", secretRef: "K" }
+      { id: "ok", url: "https://a.com/v1", model: "m", secretRef: "API_KEY" },
+      { id: "sin-modelo", url: "https://b.com/v1", secretRef: "API_KEY" },
+      { id: "sin-url", model: "m", secretRef: "API_KEY" },
+      { id: "url-http", url: "http://b.com/v1", model: "m", secretRef: "API_KEY" }
     ]);
     expect(res.providers.map(function (p) { return p.id; })).toEqual(["ok"]);
     expect(res.dropped.length).toBe(3);
@@ -199,13 +201,20 @@ describe("sanitizeProvidersArray (worker real)", function () {
     expect(res.dropped.map(function (d) { return d.reason; })).toEqual(["id-duplicado", "entrada-no-objeto", "sin-id"]);
   });
 
-  it("trims and limits fields", function () {
+  it("trims/limits name y model; un secretRef que no es identificador se descarta", function () {
     const res = sanitizeProvidersArray([
       { id: "p1", name: "a".repeat(100), url: "https://a.com/v1", model: "b".repeat(300), secretRef: "c".repeat(100) }
     ]);
-    expect(res.providers[0].name.length).toBe(50);
-    expect(res.providers[0].model.length).toBe(200);
-    expect(res.providers[0].secretRef.length).toBe(50);
+    // "c".repeat(100) no respeta el contrato de identificador -> dropped.
+    expect(res.providers.length).toBe(0);
+    expect(res.dropped.length).toBe(1);
+    expect(res.dropped[0]).toMatchObject({ id: "p1", reason: "secretref-no-identificador" });
+    const ok = sanitizeProvidersArray([
+      { id: "p2", name: "a".repeat(100), url: "https://b.com/v1", model: "b".repeat(300), secretRef: "KEY1" }
+    ]);
+    expect(ok.providers[0].name.length).toBe(50);
+    expect(ok.providers[0].model.length).toBe(200);
+    expect(ok.providers[0].secretRef).toBe("KEY1");
   });
 
   it("accepts extra.thinking_level and enabled", function () {
@@ -294,6 +303,197 @@ describe("secrets not exposed by providerStatus (worker real)", function () {
       expect(p.hasKey).toBe(true);
       expect(p.key).toBeUndefined();
     });
+  });
+
+  it("providerStatus nunca incluye el campo secretRef", function () {
+    const cfg = { providers: [{ id: "groq", name: "Groq", url: "https://api.groq.com/v1", model: "m", secretRef: "GROQ_API_KEY", enabled: true }] };
+    const status = providerStatus(FAKE_ENV, cfg);
+    expect(status.length).toBe(1);
+    expect(Object.keys(status[0]).sort()).toEqual(["active", "extra", "hasKey", "id", "model", "name", "url"]);
+    expect(status[0].secretRef).toBeUndefined();
+  });
+
+  it("aunque la KV venga contaminada, providerStatus no repite el valor", function () {
+    const cfg = { providers: [{ id: "groq", name: "Groq", url: "https://api.groq.com/v1", model: "m", secretRef: "gsk_TEST_SECRET_DO_NOT_USE", enabled: true }] };
+    const status = providerStatus(FAKE_ENV, cfg);
+    expect(status[0].secretRef).toBeUndefined();
+    expect(JSON.stringify(status)).not.toMatch(/gsk_/);
+    expect(status[0].hasKey).toBe(false);
+  });
+});
+
+// ── CONTRATO DE CREDENCIALES: secretRef = NOMBRE del Cloudflare Secret ──
+
+describe("resolveSecretRef (worker real)", function () {
+  it("valores de credencial reales no se resuelven como nombre de secret", function () {
+    expect(resolveSecretRef("groq", "gsk_TEST_SECRET_DO_NOT_USE")).toBeNull();
+    expect(resolveSecretRef("groq", "sk-abc123")).toBeNull();
+    expect(resolveSecretRef("groq", "Bearer eyJhbGciOiJI")).toBeNull();
+    expect(resolveSecretRef("groq", "eyJhbGciOiJIUzI1NiJ9")).toBeNull();
+    expect(resolveSecretRef("groq", "AIzaSyTEST")).toBeNull();
+  });
+
+  it("nombres válidos se devuelven tal cual", function () {
+    expect(resolveSecretRef("groq", "GROQ_API_KEY")).toBe("GROQ_API_KEY");
+    expect(resolveSecretRef("custom", "MI_CLAVE_2")).toBe("MI_CLAVE_2");
+  });
+
+  it("ids por defecto sin nombre usan el secretRef de fábrica", function () {
+    expect(resolveSecretRef("groq", "")).toBe("GROQ_API_KEY");
+    expect(resolveSecretRef("mistral", "  ")).toBe("MISTRAL_API_KEY");
+    expect(resolveSecretRef("groq", undefined)).toBe("GROQ_API_KEY");
+  });
+
+  it("un id desconocido sin nombre no tiene secret que resolver", function () {
+    expect(resolveSecretRef("custom", "")).toBeNull();
+    expect(resolveSecretRef("custom", undefined)).toBeNull();
+  });
+});
+
+describe("redactConfig (worker real)", function () {
+  it("elimina secretRef de config.providers sin mutar el original", function () {
+    const cfg = { providers: [{ id: "groq", name: "Groq", url: "https://api.groq.com/v1", model: "m", secretRef: "GROQ_API_KEY", enabled: true }], temperature: 0.8 };
+    const out = redactConfig(cfg);
+    expect(out.providers[0].secretRef).toBeUndefined();
+    expect(out.providers[0].id).toBe("groq");
+    expect(out.temperature).toBe(0.8);
+    expect(cfg.providers[0].secretRef).toBe("GROQ_API_KEY");
+  });
+
+  it("toler config sin providers", function () {
+    expect(redactConfig({ temperature: 0.5 }).providers).toBeUndefined();
+    expect(redactConfig({})).toEqual({});
+  });
+
+  it("una config legada (objeto) no expone secretRef (no la tiene)", function () {
+    const legacy = { providers: { groq: { model: "x" } } };
+    expect(redactConfig(legacy)).toEqual(legacy);
+  });
+});
+
+describe("sanitizeProvidersArray — contrato de identificador (worker real)", function () {
+  it("cada valor de credencial real se descarta con secretref-no-identificador", function () {
+    ["gsk_TEST_SECRET_DO_NOT_USE", "sk-abc123", "Bearer eyJhbGci", "eyJhbGciOiJIUzI1NiJ9", "AIzaSyTEST"].forEach(function (v) {
+      const res = sanitizeProvidersArray([{ id: "p1", url: "https://a.com/v1", model: "m1", secretRef: v }]);
+      expect(res.providers.length).toBe(0);
+      expect(res.dropped.length).toBe(1);
+      expect(res.dropped[0]).toMatchObject({ id: "p1", reason: "secretref-no-identificador" });
+    });
+  });
+
+  it("acepta identificadores válidos y rechaza minúsculas/símbolos", function () {
+    ["GROQ_API_KEY", "OPENROUTER_API_KEY_2"].forEach(function (v) {
+      const res = sanitizeProvidersArray([{ id: "p1", url: "https://a.com/v1", model: "m1", secretRef: v }]);
+      expect(res.providers.length).toBe(1);
+      expect(res.providers[0].secretRef).toBe(v);
+    });
+    expect(sanitizeProvidersArray([{ id: "p1", url: "https://a.com/v1", model: "m1", secretRef: "groq_api_key" }]).dropped[0].reason).toBe("secretref-no-identificador");
+    expect(sanitizeProvidersArray([{ id: "p1", url: "https://a.com/v1", model: "m1", secretRef: "GROQ_API-KEY" }]).dropped[0].reason).toBe("secretref-no-identificador");
+  });
+
+  it("inyecta el secretRef de fábrica para ids por defecto sin nombre", function () {
+    const res = sanitizeProvidersArray([{ id: "groq", url: "https://a.com/v1", model: "m1", secretRef: "" }]);
+    expect(res.providers.length).toBe(1);
+    expect(res.providers[0].secretRef).toBe("GROQ_API_KEY");
+  });
+
+  it("un id desconocido sin secretRef sigue siendo incompleto", function () {
+    const res = sanitizeProvidersArray([{ id: "custom", url: "https://a.com/v1", model: "m1", secretRef: "" }]);
+    expect(res.providers.length).toBe(0);
+    expect(res.dropped[0].missing).toContain("secretRef");
+  });
+
+  it("un id por defecto con nombre válido conserva ESE nombre (no sobreescribe)", function () {
+    const res = sanitizeProvidersArray([{ id: "groq", url: "https://a.com/v1", model: "m1", secretRef: "GROQ_CLAVE_2" }]);
+    expect(res.providers[0].secretRef).toBe("GROQ_CLAVE_2");
+  });
+});
+
+describe("sanitizeConfig — PUT contaminado no persiste (worker real)", function () {
+  it("sólo entradas contaminadas: error y nada se llega a persistir", function () {
+    const res = sanitizeConfig({ providers: [{ id: "groq", url: "https://a.com/v1", model: "m", secretRef: "gsk_TEST_SECRET_DO_NOT_USE" }] });
+    expect(res.error).toBeTruthy();
+    expect(res.cfg).toBeUndefined();
+    expect(JSON.stringify(res)).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+  });
+
+  it("contaminada + válida: sólo persiste la válida con warning secretref-no-identificador", function () {
+    const res = sanitizeConfig({ providers: [
+      { id: "groq", url: "https://a.com/v1", model: "m", secretRef: "GROQ_API_KEY" },
+      { id: "custom", url: "https://b.com/v1", model: "m2", secretRef: "gsk_TEST_SECRET_DO_NOT_USE" }
+    ] });
+    expect(res.error).toBeUndefined();
+    expect(res.cfg.providers.length).toBe(1);
+    expect(res.cfg.providers[0].id).toBe("groq");
+    expect(res.warnings[0]).toMatchObject({ id: "custom", reason: "secretref-no-identificador" });
+  });
+
+  it("la KV escrita nunca contiene el valor contaminado", function () {
+    const backend = makeFakeBackend({});
+    const r = backend.put({ providers: [
+      { id: "groq", url: "https://a.com/v1", model: "m", secretRef: "GROQ_API_KEY" },
+      { id: "custom", url: "https://b.com/v1", model: "m2", secretRef: "gsk_TEST_SECRET_DO_NOT_USE" }
+    ] });
+    expect(r.status).toBe(200);
+    expect(JSON.stringify(backend.getKv())).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+    expect(backend.getKv().providers.map(function (p) { return p.id; })).toEqual(["groq"]);
+  });
+});
+
+describe("worker — /api/provider-test sin eco de credenciales", function () {
+  function envOnly(extra) {
+    return Object.assign({ ADMIN_TOKEN: "at", CONFIG: { get: async function () { return null; }, put: async function () { } } }, extra);
+  }
+  function callTest(body, env) {
+    const req = new Request("http://worker.local/api/provider-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Admin-Token": "at" },
+      body: JSON.stringify(body)
+    });
+    return worker.fetch(req, env);
+  }
+
+  it("un secretRef contaminado no llega a resolverse y el error no lo repite", async function () {
+    const res = await callTest(
+      { providerConfig: { id: "groq", name: "Groq", url: "https://api.groq.com/v1", model: "m", secretRef: "gsk_TEST_SECRET_DO_NOT_USE" } },
+      envOnly()
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toBe("Credencial no configurada para groq");
+    expect(data.error).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+  });
+
+  it("proveedor por defecto sin nombre: solo usa la env real y el error no repite el nombre recibido", async function () {
+    const res = await callTest(
+      { providerConfig: { id: "groq", name: "Groq", url: "https://api.groq.com/v1", model: "m", secretRef: "" } },
+      envOnly()
+    );
+    expect(res.status).toBe(400);
+    const data = await res.json();
+    expect(data.error).toBe("Credencial no configurada para groq");
+  });
+
+  it("una URL inválida se rechaza antes de tocar credenciales", async function () {
+    const res = await callTest(
+      { providerConfig: { id: "groq", url: "http://insecure.com/v1", model: "m", secretRef: "GROQ_API_KEY" } },
+      envOnly({ GROQ_API_KEY: "k1" })
+    );
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toBe("URL inválida");
+  });
+});
+
+describe("round-trip PUT -> GET redactado (worker real)", function () {
+  it("KV guarda solo el nombre; el cliente nunca recibe el nombre ni el valor", function () {
+    const backend = makeFakeBackend();
+    const r = backend.put({ providers: [{ id: "groq", url: "https://api.groq.com/v1", model: "m", secretRef: "GROQ_API_KEY", enabled: true }], temperature: 0.7 });
+    expect(r.status).toBe(200);
+    expect(r.body.config.providers[0].secretRef).toBe("GROQ_API_KEY");
+    const snap = backend.snapshot();
+    expect(redactConfig(snap.config).providers[0].secretRef).toBeUndefined();
+    expect(snap.providerInfo[0].secretRef).toBeUndefined();
+    expect(JSON.stringify(snap)).not.toMatch(/gsk_/);
   });
 });
 
@@ -850,7 +1050,7 @@ describe("Admin <-> Worker — round-trip real con sanitizeConfig", function () 
   it("proveedor incompleto: el Worker lo reporta en warnings, no desaparece en silencio", function () {
     const res = sanitizeConfig({
       providers: [
-        { id: "bueno", url: "https://a.com/v1", model: "m", secretRef: "K" },
+        { id: "bueno", url: "https://a.com/v1", model: "m", secretRef: "API_KEY" },
         { id: "vacio", url: "https://", model: "", secretRef: "" }
       ]
     });
@@ -858,5 +1058,99 @@ describe("Admin <-> Worker — round-trip real con sanitizeConfig", function () 
     expect(res.warnings.length).toBe(1);
     expect(res.warnings[0]).toMatchObject({ index: 1, id: "vacio", reason: "incompleto" });
     expect(res.warnings[0].missing).toEqual(["url", "model", "secretRef"]);
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════════
+//  SEGURIDAD: el valor de la credencial jamás aparece en draft, payload, DOM
+//  ni mensajes (solo el NOMBRE del Cloudflare Secret).
+// ══════════════════════════════════════════════════════════════════════════
+
+describe("Admin — el draft solo contiene nombres, nunca valores", function () {
+  it("arranque en frío: input vacío y chip de estado por hasKey", async function () {
+    const { doc, api } = mountAdmin();
+    api.adminEntrar("tok");
+    await flush();
+    expect(api._adminState.draft[0].secretRef).toBe("");
+    expect(doc.getElementById("prov-secret-0").value).toBe("");
+    expect(doc.getElementById("prov-key-0").textContent).toBe("configurada");
+  });
+
+  it("escribir un nombre válido persiste SOLO ese nombre", async function () {
+    const { doc, api } = mountAdmin();
+    api.adminEntrar("tok");
+    await flush();
+    typeInto(doc, "prov-secret-0", "GROQ_API_KEY_2");
+    expect(api._adminState.draft[0].secretRef).toBe("GROQ_API_KEY_2");
+    expect(api._adminState.draft[0].secretRef).not.toMatch(/gsk_/);
+  });
+
+  it("un proveedor sin clave muestra «no configurada» sin más detalle", async function () {
+    const kv = { providers: [{ id: "custom", name: "Custom", url: "https://custom.example.com/v1", model: "m", secretRef: "NO_EXISTE_ESTA_KEY", enabled: true }] };
+    const { doc, api } = mountAdmin({ kv: kv });
+    api.adminEntrar("tok");
+    await flush();
+    expect(doc.getElementById("prov-key-0").textContent).toBe("no configurada");
+    expect(JSON.stringify(api._adminState.draft)).not.toMatch(/NO_EXISTE_ESTA_KEY/);
+  });
+});
+
+describe("Admin — contaminación global gsk_TEST_SECRET_DO_NOT_USE", function () {
+  it("nunca aparece en draft, payload, DOM ni mensajes", async function () {
+    const kv = { providers: [{ id: "groq", name: "Groq", url: "https://api.groq.com/v1", model: "m", secretRef: "gsk_TEST_SECRET_DO_NOT_USE", enabled: true }] };
+    const { doc, backend, api } = mountAdmin({ kv: kv });
+    api.adminEntrar("tok");
+    await flush();
+    expect(JSON.stringify(api._adminState.draft)).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+    expect(api._adminState.draft[0].secretRef).toBe("");
+    expect(doc.getElementById("prov-secret-0").value).toBe("");
+    api.adminGuardar();
+    await flush();
+    await flush();
+    expect(JSON.stringify(backend.state.lastPayload || {})).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+    expect(JSON.stringify(backend.getKv())).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+    expect(doc.getElementById("prov-secret-0").value).toBe("");
+    expect(JSON.stringify(api._adminState.draft)).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+  });
+
+  it("Guardar de un proveedor inválido en el campo de secret se bloquea sin eco del valor", async function () {
+    const { doc, backend, api } = mountAdmin();
+    api.adminEntrar("tok");
+    await flush();
+    typeInto(doc, "prov-secret-0", "gsk_TEST_SECRET_DO_NOT_USE");
+    api.adminGuardar();
+    await flush();
+    expect(backend.state.putCalls).toBe(0);
+    const msg = doc.getElementById("admin-msg").textContent;
+    expect(msg).not.toMatch(/gsk_TEST_SECRET_DO_NOT_USE/);
+    expect(msg).toMatch(/Nombre del Cloudflare Secret/);
+  });
+});
+
+describe("Admin — Probar propaga el error del Worker sin eco", function () {
+  it("el mensaje usa el error redactado del Worker", async function () {
+    const { doc, api } = mountAdmin({
+      testResponse: { lastTest: new Date().toISOString(), ok: false, status: 400, error: "Credencial no configurada para groq", category: "sin-key", model: "m", provider: "Groq" }
+    });
+    api.adminEntrar("tok");
+    await flush();
+    api.adminTestProvider(0);
+    await flush();
+    const msg = doc.getElementById("admin-msg").textContent;
+    expect(msg).toMatch(/Credencial no configurada para groq/);
+    expect(msg).not.toMatch(/gsk_/);
+  });
+});
+
+describe("Admin — arranque en frío sin estado presembrado", function () {
+  it("el draft nace exclusivamente del snapshot del Worker (cero estado manual)", async function () {
+    const { doc, backend, api } = mountAdmin();
+    expect(api._adminState.draft).toBeNull();
+    api.adminEntrar("tok");
+    await flush();
+    expect(backend.state.putCalls).toBe(0);
+    expect(api._adminState.draft.length).toBe(4);
+    expect(api._adminState.draft.map(function (p) { return p.id; })).toEqual(DEFAULT_IDS);
+    expect(JSON.stringify(api._adminState.draft)).not.toMatch(/gsk_/);
   });
 });

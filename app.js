@@ -1518,6 +1518,11 @@ function adminNombres(){
 function adminDraft(){
   return _adminState.draft||[];
 }
+/* Contrato de credenciales: secretRef es el NOMBRE del Cloudflare Secret en
+   MAYÚSCULAS (ej: GROQ_API_KEY). Un valor de credencial real (gsk_, sk-...)
+   nunca es un identificador válido y jamás debe persistirse ni mostrarse. */
+var _SECRET_REF_PATTERN=/^[A-Z][A-Z0-9_]{1,63}$/;
+function _patronSecretRefOK(v){return typeof v==="string"&&_SECRET_REF_PATTERN.test(v)}
 function adminClonProvider(p){
   p=p||{};
   var enabled=typeof p.enabled==="boolean"?p.enabled:(p.active!==false);
@@ -1526,7 +1531,7 @@ function adminClonProvider(p){
     name:p.name||"",
     url:p.url||"",
     model:p.model||"",
-    secretRef:p.secretRef||"",
+    secretRef:_patronSecretRefOK(p.secretRef)?p.secretRef:"",
     enabled:enabled,
     hasKey:p.hasKey===true,
     extra:(p.extra&&typeof p.extra==="object")?Object.assign({},p.extra):{}
@@ -1539,41 +1544,51 @@ function adminSembrarDraft(){
   return _adminState.draft;
 }
 function adminProviderConfig(p){
+  var sref=(p.secretRef||"").trim();
   return {
     id:p.id,
     name:(p.name||"").trim(),
     url:(p.url||"").trim(),
     model:(p.model||"").trim(),
-    secretRef:(p.secretRef||"").trim(),
+    secretRef:_patronSecretRefOK(sref)?sref:"",
     extra:p.extra||{}
   };
 }
-/* Serializa el draft para el Worker. NUNCA descarta filas en silencio. */
+/* Serializa el draft para el Worker. NUNCA descarta filas en silencio.
+   Un secretRef que no sea un identificador válido nunca viaja al Worker. */
 function adminSerializarDraft(){
   return adminDraft().map(function(p){
+    var sref=(p.secretRef||"").trim();
     var o={
       id:p.id,
       name:(p.name||"").trim(),
       url:(p.url||"").trim(),
       model:(p.model||"").trim(),
-      secretRef:(p.secretRef||"").trim(),
+      secretRef:_patronSecretRefOK(sref)?sref:"",
       enabled:p.enabled!==false
     };
     if(p.extra&&Object.keys(p.extra).length) o.extra=Object.assign({},p.extra);
     return o;
   });
 }
-/* Devuelve null si el draft es guardable, o el mensaje exacto del problema. */
+/* Devuelve null si el draft es guardable, o el mensaje exacto del problema.
+   La credencial: los proveedores por defecto no necesitan nombre (el Worker
+   usa el de fábrica); un nombre escrito debe ser un identificador válido. */
 function adminValidarDraft(){
   var d=adminDraft();
   if(!d.length) return "Debe haber al menos un proveedor";
+  var defs=_adminState.defaults||[];
   for(var i=0;i<d.length;i++){
     var p=d[i];
     if(p.enabled===false) continue;
     var falt=[];
     if(!(p.url||"").trim()||!/^https:\/\//i.test((p.url||"").trim())) falt.push("URL (https)");
     if(!(p.model||"").trim()) falt.push("Modelo");
-    if(!(p.secretRef||"").trim()) falt.push("Credencial");
+    var sref=(p.secretRef||"").trim();
+    if(sref&&!_patronSecretRefOK(sref)){
+      return "Proveedor "+(i+1)+" ("+(p.name||p.id)+"): el «Nombre del Cloudflare Secret» solo admite MAYÚSCULAS, números y _ (ej: GROQ_API_KEY). El valor de la clave no se introduce aquí.";
+    }
+    if(!sref&&defs.indexOf(p.id)===-1) falt.push("Credencial");
     if(falt.length) return "Proveedor "+(i+1)+" ("+(p.name||p.id)+"): falta "+falt.join(", ");
   }
   return null;
@@ -1790,6 +1805,11 @@ function adminPoblar(){
     statusEl.style.cssText="font-size:.75em;min-width:60px;text-align:center";
     adminPintarEstado(i,statusEl);
     header.appendChild(statusEl);
+    var keyEl=document.createElement("span");
+    keyEl.id="prov-key-"+i;
+    keyEl.style.cssText="font-size:.7em;min-width:90px;text-align:center;opacity:.75";
+    keyEl.textContent=(p.hasKey===true)?"configurada":"no configurada";
+    header.appendChild(keyEl);
     row.appendChild(header);
     var fields=document.createElement("div");
     fields.style.cssText="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;font-size:.8em";
@@ -1820,13 +1840,13 @@ function adminPoblar(){
     var secretInp=document.createElement("input");
     secretInp.type="text";
     secretInp.id="prov-secret-"+i;
-    secretInp.value=p.secretRef||"";
-    secretInp.placeholder="Secret (ej: GROQ_API_KEY)";
+    secretInp.value=_patronSecretRefOK(p.secretRef)?p.secretRef:"";
+    secretInp.placeholder="Nombre del Cloudflare Secret (ej: GROQ_API_KEY)";
     secretInp.style.cssText="font-size:.85em";
     secretInp.oninput=(function(ii){return function(){adminCambio(ii,"secretRef",secretInp.value)}})(i);
     var secretLbl=document.createElement("label");
     secretLbl.style.cssText="opacity:.6;font-size:.75em";
-    secretLbl.textContent="Credencial";
+    secretLbl.textContent="Nombre del Secret";
     fields.appendChild(secretLbl);
     fields.appendChild(secretInp);
     row.appendChild(fields);

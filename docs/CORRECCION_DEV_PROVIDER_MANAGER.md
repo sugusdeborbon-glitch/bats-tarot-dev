@@ -3,7 +3,8 @@
 Estado: implementado en el working tree de `bats-tarot-dev`. **Sin commit, sin push, sin deploy.**
 Alcance: solo DEV. PRO (`bats-tarot`, worker `bats-tarot-ai`) no se ha tocado.
 
-Commit de partida auditado: `db1b1e5`.
+Commit de partida auditado: `db1b1e5` (refactor draft). Checkpoint actual sobre el que se
+implementa esta corrección de credenciales: `c98ff7b`.
 
 ---
 
@@ -88,9 +89,10 @@ El frontend además **bloquea** el guardado con el nombre exacto del card incomp
   (el bug real) nunca se ejercitaba.
 - Suite nueva contra el `app.js` viejo: **25 fallidos / 92 pasados** (117) — todos en los
   flujos reales de Admin.
-- Suite nueva con la corrección: **117/117** (5 archivos).
+- Suite nueva con la corrección: **117/117** (5 archivos) en la primera versión; tras la
+  corrección del contrato de credenciales (Hito "Credenciales"): **145/145**.
 
-Cambios de la suite (`tests/provider-management.test.js`, 51 → 62 tests):
+Cambios de la suite (`tests/provider-management.test.js`, 51 → 62 → **90** tests):
 
 1. **Se importan las funciones reales** de `worker/worker.js`
    (`isValidProviderUrl`, `migrateLegacyConfig`, `buildProviders`, `sanitizeProvidersArray`,
@@ -163,3 +165,83 @@ Worker:
    ("URL inválida"), que es justo lo que se quiere ver. No hay validación previa en cliente.
 6. Decisión pendiente explícita: ¿debe `providers: []` significar "IA desactivada" (comportamiento
    actual, honesto) o "no tocar" (volver a defaults)? Hoy es lo primero.
+
+---
+
+## 7. Contrato de credenciales (identificadores, nunca valores)
+
+Diagnóstico (auditoría forense): la KV de DEV guardaba `providers[groq].secretRef` con una
+**clave real** (`gsk_…`). `secretRef` era a la vez "nombre" y "valor", y el sistema lo elegía
+sin validar nada (`env[pc.secretRef]`, `env[p.secretRef]`).
+
+**Contrato nuevo:** `secretRef` = **nombre** de un Cloudflare Secret, solo identificadores
+`^[A-Z][A-Z0-9_]{1,63}$` (ej: `GROQ_API_KEY`, `OPENROUTER_API_KEY_2`). El valor de la clave vive
+únicamente en `env.<NOMBRE>`.
+
+### Reglas implementadas
+
+**Worker (`worker/worker.js`):**
+
+- `SECRET_REF_PATTERN = /^[A-Z][A-Z0-9_]{1,63}$/` — único validador del contrato.
+- `patronSecretRefOK(v)`: verdadero solo para identificadores válidos.
+- `resolveSecretRef(id, sref)`: un string no vacío se acepta **solo** si es identificador (un
+  valor real `gsk_`, `sk-`, `Bearer…`, `eyJ…`, `AIza…` → `null`); un string vacío/ausente usa el
+  `secretRef` de fábrica para los ids por defecto y `null` para los desconocidos.
+- `redactConfig(cfg)`: clona la config quitando `secretRef` de cada proveedor. Se aplica en
+  **GET `/api/config`** (`config.providers`). `providerStatus()` y **GET `/api/provider-status`**
+  ya no devuelven `secretRef` (solo `id, name, hasKey, active, model, url, extra`).
+- `sanitizeProvidersArray`: un `secretRef` no vacío que falle el patrón → se descarta con
+  `reason: "secretref-no-identificador"` (nada desaparece en silencio). Un id por defecto sin
+  nombre recibe el `secretRef` de fábrica (para que Guardar de los 4 defaults siga funcionando
+  sin que el frontend envíe el nombre). Un id desconocido sin nombre → `incompleto`.
+- PUT: una entrada contaminada nunca se persiste; si todas lo están, error 400 "Ningún proveedor
+  válido". La KV solo guarda nombres.
+- `/api/provider-test`: resuelve la clave solo vía `resolveSecretRef`; sin credencial responde
+  `400 "Credencial no configurada para <id>"` — **nunca repite el valor ni el nombre recibido**.
+
+**Frontend (`app.js`):**
+
+- `adminClonProvider`: copia `secretRef` solo si ya es un identificador válido (defensa en
+  profundidad; además `providerStatus` ya no lo envía).
+- `adminValidarDraft`: un `secretRef` escrito y no válido bloquea Guardar con mensaje explícito
+  ("solo admite MAYÚSCULAS, números y _"); un id desconocido sin nombre exige "Credencial"; los
+  ids por defecto sin nombre NO bloquean (el Worker usa el de fábrica).
+- `adminProviderConfig` / `adminSerializarDraft`: envían `secretRef` solo si es identificador
+  válido; si no, cadena vacía (nunca viaja un valor).
+- `adminPoblar`: el input `prov-secret-*` muestra únicamente un nombre válido (nunca un valor);
+  nuevo chip `prov-key-*` con `configurada` / `no configurada` en función de `hasKey`.
+- `adminTestProvider/All` siguen propagando el error del Worker tal cual.
+
+**`index.html`**: etiqueta y ayuda del panel: «Nombre del Cloudflare Secret» (solo el NOMBRE;
+el valor de la clave nunca se muestra ni se guarda).
+
+### Tests nuevos (grupos de seguridad, 28 tests añadidos)
+
+1. `providerStatus` nunca incluye `secretRef` (incluso con KV contaminada).
+2. `redactConfig` elimina `secretRef` de `config.providers` sin mutar el original.
+3. `resolveSecretRef`: valores reales → `null`; nombres válidos → devueltos; defaults sin nombre
+   → secretRef de fábrica; id desconocido → `null`.
+4. `sanitizeProvidersArray`: gsk_/sk-/Bearer/eyJ/AIza → `secretref-no-identificador`;
+   `GROQ_API_KEY` → aceptado; minúsculas/símbolos → rechazado; inyección del default;
+   id desconocido sin nombre → incompleto.
+5. `sanitizeConfig`: PUT solo-contaminado → error y nada se persiste; contaminada+válida →
+   persiste la válida con warning; KV escrita nunca contiene el valor.
+6. `/api/provider-test` (endpoint real): 400 redactado sin eco del valor; validación de URL
+   previa.
+7. Round-trip PUT→GET: KV guarda solo nombres; el cliente nunca recibe nombre ni valor.
+8. Admin: arranque en frío con input vacío + chip por `hasKey`; escribir un nombre persiste solo
+   el nombre.
+9. Contaminación global `gsk_TEST_SECRET_DO_NOT_USE`: nunca aparece en draft, payload, DOM ni
+   mensajes; Guardar con un valor en el campo de secret se bloquea sin eco.
+10. Probar propaga el error redactado del Worker.
+11. Arranque en frío sin estado presembrado: el draft nace solo del snapshot del Worker.
+
+Test modificado por el contrato: el que esperaba truncar un `secretRef` de 100 caracteres a 50
+ahora verifica que se descarta con `secretref-no-identificador`. Fixtures de identidad ("incomplete
+entries", "no desaparece en silencio") usan `API_KEY` en lugar de `"K"` (mínimo 2 caracteres del
+patrón). Todos los valores de prueba son ficticios.
+
+> **Limpiar KV / rotar la clave real es una decisión operativa independiente** (ver auditorías
+> `AUDITORIA_CREDENCIALES_DEV.md` y `AUDITORIA_DEV_PROVIDER_MANAGER.md` en PRO). Este cambio de
+> código solo garantiza que el valor real **deje de circular** por ninguna ruta nueva; la clave
+> `gsk_…` ya persistida debe eliminarse y rotarse con el procedimiento documentado.
