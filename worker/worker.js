@@ -12,6 +12,15 @@ const ALLOWED_ORIGINS = [
 const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 60000;
 const MAX_TOKENS = 8192;
+// Criterio del camino REAL de generación: una lectura completa debe traer texto
+// suficiente. Este umbral NO se aplica al sondeo de conectividad.
+const MIN_CONTENT_CHARS = 80;
+// Sondeo de /api/provider-test: comprueba credencial + URL + modelo, no longitud.
+// Presupuesto suficiente para que el upstream devuelva texto evaluable y acepta
+// cualquier contenido no vacío ("ok", "Pong.", …).
+const PROBE_MAX_TOKENS = 32;
+const PROBE_MIN_CONTENT_CHARS = 1;
+const PROBE_MESSAGE = "PING";
 const ADMIN_ENDPOINT = "/api/config";
 const CONFIG_KEY = "ai_config";
 // Contrato de credenciales: secretRef es el NOMBRE del Cloudflare Secret, nunca el valor.
@@ -355,6 +364,11 @@ function sanitizeConfig(body) {
 export {
   MAX_PROVIDERS,
   DEFAULT_PROVIDERS,
+  MIN_CONTENT_CHARS,
+  PROBE_MAX_TOKENS,
+  PROBE_MIN_CONTENT_CHARS,
+  PROBE_MESSAGE,
+  llamarProveedor,
   isValidProviderUrl,
   migrateLegacyConfig,
   buildProviders,
@@ -475,9 +489,13 @@ export default {
           return json({ error: "Proveedor no disponible: " + providerId }, 400, req);
         }
       }
-      const testMessages = [{ role: "user", content: "PING" }];
+      const testMessages = [{ role: "user", content: PROBE_MESSAGE }];
       const t0 = Date.now();
-      const res = await llamarProveedor(target, testMessages, { temperature: 0.7, max_tokens: 5 });
+      const res = await llamarProveedor(target, testMessages, {
+        temperature: 0.7,
+        max_tokens: PROBE_MAX_TOKENS,
+        minChars: PROBE_MIN_CONTENT_CHARS
+      });
       const latency = Date.now() - t0;
       const healthEntry = {
         lastTest: new Date().toISOString(),
@@ -488,6 +506,7 @@ export default {
         modelReal: res.modelReal || null,
         provider: target.name
       };
+      if (res.finishReason) healthEntry.finishReason = res.finishReason;
       if (!res.ok) {
         healthEntry.error = res.err;
         healthEntry.category = res.category || "unknown";
@@ -734,11 +753,27 @@ async function llamarProveedor(provider, messages, payload) {
         category: category
       };
     }
-    const content = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-    if (!content || content.length < 80) {
-      return { ok: false, status: 502, err: "Respuesta vacía o demasiado corta de " + provider.name, category: "empty_response" };
+    const first = data.choices && data.choices[0];
+    const content = first && first.message ? first.message.content : undefined;
+    const finishReason = (first && first.finish_reason) || null;
+    const texto = typeof content === "string" ? content : "";
+    // minChars separa el sondeo de conectividad (>=1) del camino real (>=80).
+    const minChars = Number.isInteger(payload && payload.minChars) && payload.minChars > 0
+      ? payload.minChars
+      : MIN_CONTENT_CHARS;
+    if (texto.trim().length === 0 || texto.length < minChars) {
+      const sinContenido = texto.trim().length === 0;
+      return {
+        ok: false,
+        status: 502,
+        err: sinContenido
+          ? provider.name + ": el proveedor respondió sin contenido de texto"
+          : "Respuesta demasiado corta de " + provider.name + " (" + texto.length + " < " + minChars + " caracteres)",
+        category: "empty_response",
+        finishReason: finishReason
+      };
     }
-    return { ok: true, status: upstream.status, content: content, modelReal: data.model || null };
+    return { ok: true, status: upstream.status, content: texto, modelReal: data.model || null, finishReason: finishReason };
   } catch (e) {
     if (e && e.name === "AbortError") {
       return { ok: false, status: 504, err: provider.name + ": la petición excedió el tiempo de espera (40s).", category: "timeout" };

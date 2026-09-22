@@ -10,11 +10,15 @@
  * Todos los flujos de Admin arrancan EN FRÍO (sin estado precargado a mano):
  * solo se inyecta la respuesta GET del Worker, igual que en producción.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import worker, {
   MAX_PROVIDERS,
   DEFAULT_PROVIDERS,
+  MIN_CONTENT_CHARS,
+  PROBE_MAX_TOKENS,
+  PROBE_MIN_CONTENT_CHARS,
+  PROBE_MESSAGE,
   isValidProviderUrl,
   migrateLegacyConfig,
   buildProviders,
@@ -1152,5 +1156,206 @@ describe("Admin — arranque en frío sin estado presembrado", function () {
     expect(api._adminState.draft.length).toBe(4);
     expect(api._adminState.draft.map(function (p) { return p.id; })).toEqual(DEFAULT_IDS);
     expect(JSON.stringify(api._adminState.draft)).not.toMatch(/gsk_/);
+  });
+});
+
+// ── Worker real: /api/provider-test — veredicto del SONDEO ──
+// El sondeo comprueba credencial + URL + modelo. NO mide longitud de lectura.
+// Regresión de origen: max_tokens:5 + guard de 80 caracteres ⇒ empty_response
+// determinista en cualquier proveedor sano.
+
+describe("worker — /api/provider-test: veredicto del sondeo (worker real)", function () {
+  const realFetch = globalThis.fetch;
+
+  function probeEnv(extra) {
+    return Object.assign(
+      { ADMIN_TOKEN: "at", CONFIG: { get: async function () { return null; }, put: async function () { } } },
+      FAKE_ENV,
+      extra
+    );
+  }
+
+  // Upstream compatible con OpenAI. `choices` se pasa tal cual para poder
+  // simular respuestas vacías, truncadas o malformadas.
+  function upstream(choices, status) {
+    return {
+      ok: (status || 200) < 400,
+      status: status || 200,
+      json: async function () {
+        return { model: "modelo-upstream-real", choices: choices };
+      }
+    };
+  }
+
+  function captureCalls(response) {
+    const calls = [];
+    globalThis.fetch = async function (url, opts) {
+      calls.push({ url: url, auth: opts.headers.Authorization, body: JSON.parse(opts.body) });
+      return typeof response === "function" ? response(calls.length) : response;
+    };
+    return calls;
+  }
+
+  async function probe(pc, env) {
+    const req = new Request("https://worker.local/api/provider-test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Admin-Token": "at" },
+      body: JSON.stringify({ providerConfig: pc })
+    });
+    const res = await worker.fetch(req, env || probeEnv());
+    return { http: res.status, health: await res.json() };
+  }
+
+  const GOOGLE = {
+    id: "google",
+    name: "Google",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    model: "gemini-3.6-flash",
+    secretRef: "",
+    extra: { thinking_level: "low" }
+  };
+
+  afterEach(function () {
+    globalThis.fetch = realFetch;
+  });
+
+  it("contenido corto pero válido (\"ok\") ⇒ ok:true (regresión del empty_response)", async function () {
+    captureCalls(upstream([{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]));
+    const r = await probe(GOOGLE);
+    expect(r.http).toBe(200);
+    expect(r.health.ok).toBe(true);
+    expect(r.health.category).toBeUndefined();
+    expect(r.health.status).toBe(200);
+    expect(r.health.modelReal).toBe("modelo-upstream-real");
+  });
+
+  it("content vacío ⇒ empty_response con diagnóstico de ausencia de texto", async function () {
+    captureCalls(upstream([{ message: { role: "assistant", content: "" }, finish_reason: "length" }]));
+    const r = await probe(GOOGLE);
+    expect(r.health.ok).toBe(false);
+    expect(r.health.category).toBe("empty_response");
+    expect(r.health.error).toMatch(/sin contenido de texto/);
+  });
+
+  it("choices: [] ⇒ empty_response y no revienta", async function () {
+    captureCalls(upstream([]));
+    const r = await probe(GOOGLE);
+    expect(r.health.ok).toBe(false);
+    expect(r.health.category).toBe("empty_response");
+    expect(r.health.error).toMatch(/sin contenido de texto/);
+  });
+
+  it("message ausente ⇒ empty_response", async function () {
+    captureCalls(upstream([{ finish_reason: "length" }]));
+    const r = await probe(GOOGLE);
+    expect(r.health.ok).toBe(false);
+    expect(r.health.category).toBe("empty_response");
+  });
+
+  it("content: null ⇒ empty_response", async function () {
+    captureCalls(upstream([{ message: { role: "assistant", content: null }, finish_reason: "stop" }]));
+    const r = await probe(GOOGLE);
+    expect(r.health.ok).toBe(false);
+    expect(r.health.category).toBe("empty_response");
+  });
+
+  it("content de solo espacios ⇒ empty_response (no cuenta como contenido)", async function () {
+    captureCalls(upstream([{ message: { role: "assistant", content: "   " }, finish_reason: "stop" }]));
+    const r = await probe(GOOGLE);
+    expect(r.health.ok).toBe(false);
+    expect(r.health.category).toBe("empty_response");
+  });
+
+  it("finish_reason viaja al healthEntry (diagnóstico de truncado)", async function () {
+    captureCalls(upstream([{ message: { role: "assistant", content: "ok" }, finish_reason: "length" }]));
+    const r = await probe(GOOGLE);
+    expect(r.health.ok).toBe(true);
+    expect(r.health.finishReason).toBe("length");
+  });
+
+  it("el sondeo usa un presupuesto suficiente, manda PING y NO filtra minChars al upstream", async function () {
+    const calls = captureCalls(upstream([{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]));
+    await probe(GOOGLE);
+    expect(PROBE_MAX_TOKENS).toBeGreaterThan(5);
+    expect(PROBE_MIN_CONTENT_CHARS).toBeLessThan(MIN_CONTENT_CHARS);
+    expect(calls.length).toBe(1);
+    expect(calls[0].body.max_tokens).toBe(PROBE_MAX_TOKENS);
+    expect(calls[0].body.messages).toEqual([{ role: "user", content: PROBE_MESSAGE }]);
+    expect(calls[0].body.model).toBe("gemini-3.6-flash");
+    expect(calls[0].body.minChars).toBeUndefined();
+  });
+
+  it("la credencial se resuelve y viaja como Bearer, sin eco en la respuesta", async function () {
+    const calls = captureCalls(upstream([{ message: { role: "assistant", content: "ok" }, finish_reason: "stop" }]));
+    const r = await probe(GOOGLE);
+    expect(calls[0].auth).toBe("Bearer " + FAKE_ENV.GOOGLE_API_KEY);
+    expect(JSON.stringify(r.health)).not.toMatch(new RegExp(FAKE_ENV.GOOGLE_API_KEY));
+  });
+
+  it("Google: extra.thinking_level viaja como extra_body y no impide ok", async function () {
+    const calls = captureCalls(upstream([{ message: { role: "assistant", content: "Pong." }, finish_reason: "stop" }]));
+    const r = await probe(GOOGLE);
+    expect(calls[0].body.extra_body.google.thinking_config.thinking_level).toBe("low");
+    expect(r.health.ok).toBe(true);
+  });
+});
+
+// ── Worker real: camino REAL de generación — la frontera >=80 se conserva ──
+
+describe("worker — generación real: la frontera de 80 caracteres no se relaja", function () {
+  const realFetch = globalThis.fetch;
+
+  afterEach(function () {
+    globalThis.fetch = realFetch;
+  });
+
+  function captureContent(content) {
+    const calls = [];
+    globalThis.fetch = async function (url, opts) {
+      calls.push(JSON.parse(opts.body));
+      return {
+        ok: true,
+        status: 200,
+        json: async function () {
+          return { model: "modelo-upstream-real", choices: [{ message: { content: content }, finish_reason: "stop" }] };
+        }
+      };
+    };
+    return calls;
+  }
+
+  let ipCounter = 0;
+
+  async function chat() {
+    ipCounter++;
+    const req = new Request("https://worker.local/", {
+      method: "POST",
+      // IP distinta por prueba: el rate-limit del Worker es por IP y no debe
+      // acoplar el resultado de estos tests a su propia contabilidad.
+      headers: { "Content-Type": "application/json", "CF-Connecting-IP": "10.2.0." + ipCounter },
+      body: JSON.stringify({ tipo: "diaria", messages: [{ role: "user", content: "una tirada" }] })
+    });
+    const res = await worker.fetch(req, Object.assign({
+      CONFIG: { get: async function () { return null; }, put: async function () { } }
+    }, FAKE_ENV));
+    return { http: res.status, body: await res.json() };
+  }
+
+  it("79 caracteres ⇒ rechazado por el guard de producción", async function () {
+    captureContent("x".repeat(MIN_CONTENT_CHARS - 1));
+    const r = await chat();
+    expect(r.http).toBe(502);
+    expect(r.body.error).toMatch(/Todos los proveedores fallaron/);
+    expect(r.body.error).toMatch(/empty_response/);
+    expect(r.body.error).toMatch(/79 < 80/);
+  });
+
+  it("80 caracteres ⇒ aceptado", async function () {
+    const calls = captureContent("x".repeat(MIN_CONTENT_CHARS));
+    const r = await chat();
+    expect(r.http).toBe(200);
+    expect(r.body.content.length).toBe(MIN_CONTENT_CHARS);
+    expect(r.body.provider).toBe("Groq");
+    expect(calls[0].minChars).toBeUndefined();
   });
 });
