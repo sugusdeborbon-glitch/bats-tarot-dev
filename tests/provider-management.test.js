@@ -1359,3 +1359,37 @@ describe("worker — generación real: la frontera de 80 caracteres no se relaja
     expect(calls[0].minChars).toBeUndefined();
   });
 });
+
+// ── H-01: Comodín — el mazo respeta la activación del usuario (app.js REAL) ──
+
+describe("H-01 — añadirComodin (app.js): solo incorpora el Comodín si está activo", function () {
+  /** Cabecera real de app.js (hasta antes de la lógica de numerología): pura y
+   * auto-contenida. La carga con `new Function` igual que el resto del arnés. */
+  function loadComodinChunk() {
+    const src = readFileSync(APP_JS_PATH, "utf8");
+    const start = src.indexOf("function añadirComodin");
+    if (start < 0) throw new Error("añadirComodin not found in app.js");
+    const end = src.indexOf("function normalizarNombre");
+    if (end < 0 || end <= start) throw new Error("comodin chunk not found in app.js");
+    const factory = new Function("window", src.slice(0, end) + "\nreturn {añadirComodin:añadirComodin,COMODIN:COMODIN};");
+    return factory({});
+  }
+
+  it("desactivado ⇒ no se añade Comodín", function () {
+    const mod = loadComodinChunk();
+    const mazo = [{ nombre: "Arcano" }];
+    const out = mod.añadirComodin(mazo, false);
+    expect(out).toBe(mazo);
+    expect(out.length).toBe(1);
+    expect(out.some(function (c) { return c.tipo === "comodin"; })).toBe(false);
+  });
+
+  it("activado ⇒ se añade una copia del Comodín", function () {
+    const mod = loadComodinChunk();
+    const mazo = [{ nombre: "Arcano" }];
+    const out = mod.añadirComodin(mazo, true);
+    expect(out.length).toBe(2);
+    expect(out.some(function (c) { return c.tipo === "comodin"; })).toBe(true);
+    expect(mod.COMODIN.tipo).toBe("comodin");
+  });
+});

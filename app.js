@@ -1,6 +1,5 @@
 var BATS_VERSION="1.10.0";
 window._ocultarReferencias=false;
-var _BATS_TEST_COMODIN=true; // TODO: remove after testing
 
 var PALOS=[["bastos","Wands"],["copas","Cups"],["espadas","Swords"],["oros","Pentacles"]];
 var NOMPALO={bastos:"Bastos",copas:"Copas",espadas:"Espadas",oros:"Oros"};
@@ -34,7 +33,7 @@ var COMODIN_TEXTO_CERRADO="Toca la carta para abrir la extensión BATS.";
 var COMODIN_TEXTO_ABIERTO="Toca una carta extendida para ver su interpretación completa.";
 var COMODIN_POS=["¿De qué te quiere avisar?","¿En qué te quiere ayudar?","La Salida"];
 function esComodin(c){return c&&c.tipo==="comodin"}
-function añadirComodin(mazo,activo){if(!activo&&!window._BATS_TEST_COMODIN)return mazo;mazo.push(Object.assign({},COMODIN));return mazo}
+function añadirComodin(mazo,activo){if(!activo)return mazo;mazo.push(Object.assign({},COMODIN));return mazo}
 function comodinImg(estado,invertida){
   if(estado==="cerrado") return "comodin_anverso_umbral_cerrado.png";
   if(estado==="abierto") return "comodin_anverso_umbral_abierto.png";
