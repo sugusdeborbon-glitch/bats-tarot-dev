@@ -194,12 +194,44 @@ function construirUserContent(cartas,ctx){
   if(ctx.observado) lines.push("Lo observado: "+ctx.observado);
   lines.push("");
   lines.push("Posiciones y cartas (con referencia BATS):");
+  var ci=null;
+  if(typeof comodinResuelto==="function") ci=comodinResuelto(cartas);
   cartas.forEach(function(it,i){
     var c=it.carta,inv=it.invertida;
-    lines.push((i+1)+". ["+i+"] "+(it.posicion||"Posici\u00f3n "+(i+1))+": "+c.nombre+(inv?" (INVERTIDA)":""));
+    var label=it.posicion||"Posici\u00f3n "+(i+1);
+    if(ci&&ci.extensionResuelta&&typeof esComodin==="function"&&esComodin(c)){
+      var laSalida=ci.extension&&ci.extension[2];
+      if(laSalida) label=label+" (Comod\u00edn \u2192 La Salida: "+laSalida.carta.nombre+(laSalida.invertida?" INVERTIDA":"")+")";
+    }
+    lines.push((i+1)+". ["+i+"] "+label+": "+c.nombre+(inv?" (INVERTIDA)":""));
     var ref=(it.texto||txt(c,inv,false)||"").replace(/\s+/g," ").trim();
     if(ref) lines.push("   Referencia BATS: "+ref);
   });
+  if(ci&&ci.extension&&ci.extensionResuelta){
+    lines.push("");
+    lines.push("IMPORTANTE: Esta tirada incluye un COMOD\u00cdN resuelto con una extensi\u00f3n de 3 cartas.");
+    lines.push("El COMOD\u00cdN apareci\u00f3 en la posici\u00f3n: "+(ci.posicion||"desconocida")+".");
+    lines.push("La Salida (la tercera carta de la extensi\u00f3n) reemplaza al Comod\u00edn en su posici\u00f3n original.");
+    lines.push("La quintaesencia ya fue recalculada con La Salida (su valor num\u00e9rico sustituye al del Comod\u00edn).");
+    lines.push("Mec\u00e1nica del Comod\u00edn en esta tirada:");
+    lines.push("  - El Comod\u00edn apareci\u00f3 boca abajo (invertido) = La carta oculta tiende a su polo opuesto.");
+    lines.push("  - Al dar vuelta = reverso: su significado astral directo.");
+    lines.push("  - Al cerrar umbral = cierra el ciclo.");
+    lines.push("  - Al abrir umbral = revela la carta del destino \u2192 extensi\u00f3n de 3 cartas.");
+    lines.push("    \u2022 Posici\u00f3n 1: Significado de la carta en su polaridad (aviso/sombra).");
+    lines.push("    \u2022 Posici\u00f3n 2: Qu\u00e9 est\u00e1 bloqueando o impulsando esa polaridad (ayuda).");
+    lines.push("    \u2022 Posici\u00f3n 3: La Salida \u2192 reemplaza al Comod\u00edn en la tirada.");
+    lines.push("Interpreta la tirada completa, integrando la extensi\u00f3n del Comod\u00edn.");
+    lines.push("La Salida reemplaza al Comod\u00edn en su posici\u00f3n original. Interpreta la tirada como si La Salida fuera la carta original.");
+    lines.push("");
+    lines.push("Cartas de la extensi\u00f3n:");
+    ci.extension.forEach(function(it2,ei){
+      var c2=it2.carta,inv2=it2.invertida;
+      var ref2=(it2.texto||txt(c2,inv2,false)||"").replace(/\s+/g," ").trim();
+      lines.push("  * "+it2.posicion+": "+c2.nombre+(inv2?" (INVERTIDA)":"")+(ei===2?" (valor): "+c2.valor+"": ""));
+      if(ref2) lines.push("    Referencia BATS: "+ref2);
+    });
+  }
   var q=cartas._q;
   if(q){
     lines.push("");
