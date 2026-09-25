@@ -130,8 +130,12 @@ function llamarIA(payload,tipo){
 function fetchConTimeout(url,body,extra){
   var timeoutMs=(extra&&extra.timeoutMs)||60000;
   var ctrl=("AbortController" in window)?new AbortController():null;
-  var timer=ctrl?setTimeout(function(){ctrl.abort()},timeoutMs):null;
-  function limpiar(){if(timer) clearTimeout(timer)}
+  // H-04: el timeout SIEMPRE se programa. Con AbortController disponible aborta
+  // (dureza: error "La IA tardó demasiado"); sin él, marca "caducado" y la
+  // respuesta tardía se acepta (suavidad: el contrato temporal nunca cuelga).
+  var caducado=false;
+  var timer=setTimeout(function(){caducado=true;if(ctrl) ctrl.abort()},timeoutMs);
+  function limpiar(){clearTimeout(timer)}
   function status(s){try{if(window._iaStatus) window._iaStatus(s)}catch(e){}}
   var opts={
     method:"POST",
@@ -145,7 +149,10 @@ function fetchConTimeout(url,body,extra){
   var p;
   try{ p=fetch(url,opts); }
   catch(e){ limpiar(); return Promise.reject(new Error("URL del servidor de IA inv\u00e1lida. Rev\u00edsala en Configuraci\u00f3n.")); }
-  return p.then(function(r){status("Respuesta recibida, procesando\u2026");return parseAIRespuesta(r)}).then(function(v){limpiar();return v},function(e){
+  return p.then(function(r){status("Respuesta recibida, procesando\u2026");return parseAIRespuesta(r)}).then(function(v){
+    limpiar();
+    return v;
+  },function(e){
     limpiar();
     status("error");
     if(e&&e.name==="AbortError") throw new Error("La IA tard\u00f3 demasiado. Reintenta.");

@@ -936,6 +936,7 @@ function renderConIA(cartas,dest,renderFn,ctx){
     try{ponerBotones(dest,titulo,panelId)}catch(e){console.error("ponerBotones:",e)}
   }).catch(falloIA);
 }
+var _iaReq=0;
 function renderInterpLarga(dest,cartas,ctx){
   ctx=ctx||{};
   var el=document.getElementById(dest);
@@ -952,14 +953,17 @@ function renderInterpLarga(dest,cartas,ctx){
   var body=cont.querySelector(".ai-interp-body")||cont;
   var tEl=body.querySelector(".ai-interp-t");
   var sEl=body.querySelector(".ai-interp-status");
+  var reqId=++_iaReq;
   var ini=Date.now(),tick=null,failsafe=null,acabado=false;
   function limpiar(){acabado=true;if(tick){clearInterval(tick);tick=null}if(failsafe){clearTimeout(failsafe);failsafe=null}}
   function mostrarError(e){
+    if(acabado||reqId!==_iaReq) return;
     limpiar();
     try{console.error("Error interpretacion larga:",e)}catch(_){}
     body.innerHTML='<p class="subtle">No se pudo generar la interpretaci\u00f3n'+(e&&e.message?": "+e.message:"")+'</p><div class="ai-interp-btns"><button class="btn btn-outline btn-sm" onclick="reintentarInterp(\''+dest+'\')">Reintentar</button></div>';
   }
   function mostrarOK(t){
+    if(acabado||reqId!==_iaReq) return;
     limpiar();
     cartas._interp=t;
     cartas._ia=etiquetaIA()||"";
@@ -974,19 +978,22 @@ function renderInterpLarga(dest,cartas,ctx){
     }
   }
   function tickS(){
-    if(!acabado&&tEl) tEl.textContent=" ("+Math.round((Date.now()-ini)/1000)+" s)";
+    if(acabado||reqId!==_iaReq) return;
+    if(tEl) tEl.textContent=" ("+Math.round((Date.now()-ini)/1000)+" s)";
   }
   window._iaStatus=function(s){
-    if(acabado) return;
+    if(acabado||reqId!==_iaReq) return;
     if(sEl) sEl.textContent=s;
     try{console.log("[BATS-IA]",s)}catch(_){}
   };
   tickS();
   tick=setInterval(tickS,1000);
+  // H-04: sin error terminal por tiempo. Dentro del margen del frontend (90 s)
+  // sólo se informa progreso; la promesa real decide el desenlace.
   failsafe=setTimeout(function(){
-    if(acabado) return;
-    if(body&&body.querySelector(".ai-spinner")) mostrarError(new Error("La IA tard\u00f3 demasiado. Reintenta."));
-  },30000);
+    if(acabado||reqId!==_iaReq) return;
+    if(sEl) sEl.textContent="La IA sigue procesando (l\u00edmite 90 s)\u2026";
+  },75000);
   try{
     generarInterpretacionLarga(cartas,ctx).then(function(t){
       mostrarOK(t);

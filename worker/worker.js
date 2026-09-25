@@ -32,6 +32,19 @@ const TTS_GOOGLE = "https://translate.google.com/translate_tts";
 const AI_FLAGS_ENDPOINT = "/api/ai-flags";
 const DEFAULT_USE_CORTA = true;
 const DEFAULT_USE_LARGA = true;
+// H-04 — Contrato temporal end-to-end. El frontend espera la respuesta en 60 s
+// (corta) / 90 s (larga); este Worker reparte ese presupuesto entre proveedores
+// con un deadline global y NUNCA inicia uno si no queda tiempo útil
+// (remaining < minSlice). El sondeo de conectividad (/api/provider-test) usa el
+// límite de defensa genérico, sin presupuesto de generación.
+const TIMEOUT_UPSTREAM_DEFAULT_MS = 40000;
+const BUDGET = {
+  corta: { total: 50000, p1: 24000, pk: 13000, minSlice: 8000 },
+  larga: { total: 75000, p1: 35000, pk: 10000, minSlice: 10000 }
+};
+function budgetDeTipo(tipo) {
+  return tipo === "larga" ? BUDGET.larga : BUDGET.corta;
+}
 
 function _sistemaBase(nombre, estructura) {
   return "Eres el intérprete profesional BATS (Business Ashram Tarot System) para la tirada “" + nombre + "”, basada en el mazo Rider-Waite-Smith.\n"
@@ -364,6 +377,7 @@ function sanitizeConfig(body) {
 export {
   MAX_PROVIDERS,
   DEFAULT_PROVIDERS,
+  BUDGET,
   MIN_CONTENT_CHARS,
   PROBE_MAX_TOKENS,
   PROBE_MIN_CONTENT_CHARS,
@@ -616,7 +630,7 @@ export default {
       if (!pkey) {
         return json({ error: "Falta la clave del consultante" }, 401, req);
       }
-      const p = await llamarEndpointPropio(body.base, body.model, msgs, cfg, pkey);
+      const p = await llamarEndpointPropio(body.base, body.model, msgs, cfg, pkey, tipo);
       if (p.ok) {
         return json({ content: p.content, provider: "Mi IA", modelo: (typeof body.model === "string" && body.model) ? body.model : "gpt-4o-mini" }, 200, req, "propia");
       }
@@ -640,8 +654,18 @@ export default {
 
     let last = null;
     const errors = [];
-    for (const provider of providers) {
-      const res = await llamarProveedor(provider, msgs, payload);
+    const budget = budgetDeTipo(tipo);
+    const t0 = Date.now();
+    for (let k = 0; k < providers.length; k++) {
+      const provider = providers[k];
+      const remaining = budget.total - (Date.now() - t0);
+      if (remaining < budget.minSlice) {
+        last = { ok: false, status: 504, err: "deadline: presupuesto de generaci\u00f3n agotado", category: "deadline" };
+        errors.push(provider.name + ": no iniciado, presupuesto de tiempo agotado [deadline]");
+        break;
+      }
+      const slice = Math.min(k === 0 ? budget.p1 : budget.pk, remaining);
+      const res = await llamarProveedor(provider, msgs, Object.assign({}, payload, { timeoutMs: slice }));
       if (res.ok) {
         return json({ content: res.content, provider: provider.name, modelo: provider.model, modeloReal: res.modelReal || null }, 200, req, provider.name);
       }
@@ -650,16 +674,19 @@ export default {
     }
     if (last) {
       const status = last.status && last.status >= 400 ? last.status : 502;
-      const summary = "Todos los proveedores fallaron (" + providers.length + "): " + errors.join(" | ");
+      const summary = "Todos los proveedores fallaron (" + errors.length + "): " + errors.join(" | ");
       return json({ error: summary }, status, req);
     }
     return json({ error: "Error desconocido del proveedor" }, 502, req);
   }
 };
 
-async function llamarEndpointPropio(base, model, messages, cfg, key) {
+async function llamarEndpointPropio(base, model, messages, cfg, key, tipo) {
+  // El proveedor propio comparte el deadline global de la modalidad, pero nunca
+  // puede esperar más que el límite de defensa genérico.
+  const deadline = Math.min(TIMEOUT_UPSTREAM_DEFAULT_MS, budgetDeTipo(tipo).total);
   const ctrl = new AbortController();
-  const timer = setTimeout(function(){ ctrl.abort(); }, 40000);
+  const timer = setTimeout(function(){ ctrl.abort(); }, deadline);
   const bodyObj = {
     model: (typeof model === "string" && model) ? model : "gpt-4o-mini",
     messages: messages,
@@ -690,7 +717,7 @@ async function llamarEndpointPropio(base, model, messages, cfg, key) {
     return { ok: true, status: upstream.status, content: content };
   } catch (e) {
     if (e && e.name === "AbortError") {
-      return { ok: false, status: 504, err: "El proveedor propio tardó demasiado" };
+      return { ok: false, status: 504, err: "El proveedor propio tard\u00f3 demasiado", category: "timeout" };
     }
     return { ok: false, status: 502, err: "Error de red con el proveedor propio" };
   } finally {
@@ -699,8 +726,9 @@ async function llamarEndpointPropio(base, model, messages, cfg, key) {
 }
 
 async function llamarProveedor(provider, messages, payload) {
+  const timeoutMs = payload && payload.timeoutMs > 0 ? payload.timeoutMs : TIMEOUT_UPSTREAM_DEFAULT_MS;
   const ctrl = new AbortController();
-  const timer = setTimeout(function(){ ctrl.abort(); }, 40000);
+  const timer = setTimeout(function(){ ctrl.abort(); }, timeoutMs);
   const bodyObj = {
     model: provider.model,
     messages: messages,
@@ -774,9 +802,9 @@ async function llamarProveedor(provider, messages, payload) {
       };
     }
     return { ok: true, status: upstream.status, content: texto, modelReal: data.model || null, finishReason: finishReason };
-  } catch (e) {
+} catch (e) {
     if (e && e.name === "AbortError") {
-      return { ok: false, status: 504, err: provider.name + ": la petición excedió el tiempo de espera (40s).", category: "timeout" };
+      return { ok: false, status: 504, err: provider.name + ": la petici\u00f3n excedi\u00f3 el tiempo de espera (" + Math.round(timeoutMs / 1000) + "s).", category: "timeout" };
     }
     return { ok: false, status: 502, err: provider.name + ": error de red — " + (e && e.message || "desconocido"), category: "network_error" };
   } finally {
